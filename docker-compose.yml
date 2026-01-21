@@ -9,7 +9,7 @@ services:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
     ports:
-      - "5432:5432"
+      - "5433:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -23,8 +23,6 @@ services:
   redis:
     image: redis:7-alpine
     container_name: sgr_redis
-    ports:
-      - "6379:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -46,8 +44,6 @@ services:
       - LLM_API_KEY=${LLM_API_KEY:-}
       - LLM_MODEL=${LLM_MODEL:-gpt-4o-mini}
       - DEBUG=true
-    ports:
-      - "8000:8000"
     volumes:
       - ./backend:/app
       - ./storage:/app/storage
@@ -91,8 +87,6 @@ services:
       context: ./mcp_service
       dockerfile: Dockerfile
     container_name: sgr_mcp_service
-    ports:
-      - "9000:9000"
     volumes:
       - ./storage:/app/storage
     env_file:
@@ -106,7 +100,6 @@ services:
       dockerfile: Dockerfile
     container_name: sgr_frontend
     environment:
-      - REACT_APP_API_URL=http://localhost:8000
       - DOCKER_ENV=true
     ports:
       - "3000:3000"
@@ -122,8 +115,6 @@ services:
   prometheus:
     image: prom/prometheus:latest
     container_name: sgr_prometheus
-    ports:
-      - "9090:9090"
     volumes:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
       - prometheus_data:/prometheus
@@ -141,8 +132,6 @@ services:
   grafana:
     image: grafana/grafana:11.2.0
     container_name: sgr_grafana
-    ports:
-      - "3001:3000"
     environment:
       - GF_SECURITY_ADMIN_PASSWORD=admin
       - GF_USERS_ALLOW_SIGN_UP=false
@@ -161,10 +150,6 @@ services:
   jaeger:
     image: jaegertracing/all-in-one:latest
     container_name: sgr_jaeger
-    ports:
-      - "16686:16686"  # UI
-      - "14268:14268"  # HTTP collector
-      - "6831:6831/udp"  # UDP collector
     environment:
       - COLLECTOR_ZIPKIN_HOST_PORT=:9411
     networks:

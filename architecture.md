@@ -288,15 +288,16 @@ mcp_service/
 ## Инфраструктура
 
 - **Docker Compose** (`docker-compose.yml`) - оркестрация всех сервисов для разработки:
-  - Backend (порт 8000)
-  - Celery Worker - обработка асинхронных задач через Redis
-  - Frontend (порт 3000)
-  - PostgreSQL (порт 5432)
-  - Redis (порт 6379)
-  - MCP Service (порт 9000)
-  - Prometheus (порт 9090)
-  - Grafana (порт 3001)
-  - Jaeger (порт 16686)
+  - **Сетевая конфигурация**: все сервисы кроме PostgreSQL и Frontend находятся только внутри сети `sgr_network` без внешних портов. PostgreSQL и Frontend имеют внешние порты для доступа извне, но также подключены к сети `sgr_network` для взаимодействия с другими сервисами
+  - Frontend (порт 3000) - внешний доступ
+  - PostgreSQL (порт 5433) - внешний доступ
+  - Backend - только внутри сети sgr_network
+  - Celery Worker - только внутри сети sgr_network, обработка асинхронных задач через Redis
+  - Redis - только внутри сети sgr_network
+  - MCP Service - только внутри сети sgr_network
+  - Prometheus - только внутри сети sgr_network
+  - Grafana - только внутри сети sgr_network
+  - Jaeger - только внутри сети sgr_network
 - **Docker Compose Production** (`docker-compose.prod.yml`) - production конфигурация с:
   - Оптимизированными Dockerfile для backend и frontend
   - Celery Worker для обработки асинхронных задач
