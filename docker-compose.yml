@@ -1,0 +1,178 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:14-alpine
+    container_name: sgr_postgres
+    environment:
+      POSTGRES_DB: sgr_agent_db
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - sgr_network
+
+  redis:
+    image: redis:7-alpine
+    container_name: sgr_redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - sgr_network
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: sgr_backend
+    environment:
+      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/sgr_agent_db
+      - REDIS_URL=redis://redis:6379/0
+      - MCP_SERVICE_URL=http://mcp_service:9000
+      - LLM_PROVIDER=${LLM_PROVIDER:-openai}
+      - LLM_API_KEY=${LLM_API_KEY:-}
+      - LLM_MODEL=${LLM_MODEL:-gpt-4o-mini}
+      - DEBUG=true
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app
+      - ./storage:/app/storage
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - sgr_network
+
+  celery_worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: sgr_celery_worker
+    environment:
+      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/sgr_agent_db
+      - REDIS_URL=redis://redis:6379/0
+      - MCP_SERVICE_URL=http://mcp_service:9000
+      - LLM_PROVIDER=${LLM_PROVIDER:-openai}
+      - LLM_API_KEY=${LLM_API_KEY:-}
+      - LLM_MODEL=${LLM_MODEL:-gpt-4o-mini}
+      - DEBUG=true
+    volumes:
+      - ./backend:/app
+      - ./storage:/app/storage
+    command: celery -A app.tasks.celery_app worker --loglevel=info
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      backend:
+        condition: service_started
+    networks:
+      - sgr_network
+
+  mcp_service:
+    build:
+      context: ./mcp_service
+      dockerfile: Dockerfile
+    container_name: sgr_mcp_service
+    ports:
+      - "9000:9000"
+    env_file:
+      - .env
+    networks:
+      - sgr_network
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: sgr_frontend
+    environment:
+      - REACT_APP_API_URL=http://localhost:8000
+      - DOCKER_ENV=true
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    command: npm run dev
+    depends_on:
+      - backend
+    networks:
+      - sgr_network
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: sgr_prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:9090/-/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - sgr_network
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    container_name: sgr_grafana
+    ports:
+      - "3001:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_PATHS_PROVISIONING=/etc/grafana/provisioning
+      - GF_INSTALL_PLUGINS=
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning
+      - ./grafana/dashboards:/var/lib/grafana/dashboards
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    networks:
+      - sgr_network
+
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    container_name: sgr_jaeger
+    ports:
+      - "16686:16686"  # UI
+      - "14268:14268"  # HTTP collector
+      - "6831:6831/udp"  # UDP collector
+    environment:
+      - COLLECTOR_ZIPKIN_HOST_PORT=:9411
+    networks:
+      - sgr_network
+
+volumes:
+  postgres_data:
+  prometheus_data:
+  grafana_data:
+
+networks:
+  sgr_network:
+    driver: bridge

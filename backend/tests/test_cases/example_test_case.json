@@ -1,0 +1,63 @@
+{
+  "id": "test-case-001",
+  "name": "Пример тестового случая для юридического лица",
+  "description": "Тестовый случай для проверки извлечения данных контракта с юридическим лицом (ООО)",
+  "input_document": "example_contract.docx",
+  "expected_output": {
+    "inn": "7707083893",
+    "full_name": "Общество с ограниченной ответственностью 'Пример'",
+    "short_name": "ООО 'Пример'",
+    "organizational_form": "ООО",
+    "legal_entity_type": "Юридическое лицо",
+    "role": "Поставщик",
+    "kpp": "770701001",
+    "contract_name": "Договор оказания услуг",
+    "contract_number": "123/2024",
+    "contract_date": "2024-01-15",
+    "contract_price": "1000000.00",
+    "vat_percent": "20.00",
+    "vat_type": "Добавляется",
+    "service_description": "Оказание консультационных услуг",
+    "service_start_date": "2024-02-01",
+    "service_end_date": "2024-12-31",
+    "service_locations": [
+      {
+        "address": "г. Москва, ул. Примерная, д. 1",
+        "responsible_person": {
+          "name": "Иванов Иван Иванович",
+          "phone": "+7 (495) 123-45-67",
+          "email": "ivanov@example.com"
+        },
+        "directions": "Метро Примерная, выход 1"
+      }
+    ],
+    "responsible_persons": [
+      {
+        "name": "Петров Петр Петрович",
+        "phone": "+7 (495) 765-43-21",
+        "email": "petrov@example.com"
+      }
+    ],
+    "payment_terms": "Оплата в течение 10 банковских дней",
+    "extraction_confidence": "0.95"
+  },
+  "required_fields": [
+    "inn",
+    "full_name",
+    "short_name",
+    "organizational_form",
+    "legal_entity_type",
+    "role",
+    "kpp",
+    "contract_price"
+  ],
+  "tolerance": {
+    "contract_price": 0.01,
+    "vat_percent": 0.1
+  },
+  "tags": [
+    "legal_entity",
+    "supplier",
+    "basic"
+  ]
+}

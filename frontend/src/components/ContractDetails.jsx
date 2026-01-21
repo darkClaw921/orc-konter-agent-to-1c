@@ -1,0 +1,529 @@
+import React, { useEffect, useState } from 'react';
+import { useParams, useNavigate } from 'react-router-dom';
+import { useDispatch } from 'react-redux';
+import { getContractData, getContractStatus, retryContract, getLLMInfo } from '../services/contractService';
+import { addNotification } from '../store/slices/uiSlice';
+import DataViewer from './DataViewer';
+import ValidationResults from './ValidationResults';
+import LoadingSpinner from './LoadingSpinner';
+
+const ContractDetails = () => {
+  const dispatch = useDispatch();
+  const { id } = useParams();
+  const navigate = useNavigate();
+  const [contractData, setContractData] = useState(null);
+  const [contractStatus, setContractStatus] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [validationResults, setValidationResults] = useState(null);
+  const [showLLMInfo, setShowLLMInfo] = useState(false);
+  const [llmInfo, setLlmInfo] = useState(null);
+  const [loadingLLMInfo, setLoadingLLMInfo] = useState(false);
+
+  useEffect(() => {
+    const loadContractDetails = async () => {
+      try {
+        setLoading(true);
+        
+        // Сначала загружаем статус контракта
+        const status = await getContractStatus(id);
+        setContractStatus(status);
+
+        // Загружаем данные только если контракт обработан
+        // Статусы, при которых данные могут быть доступны:
+        const dataAvailableStatuses = [
+          'completed',
+          'validation_passed',
+          'validation_failed',
+          'failed'
+        ];
+        
+        if (dataAvailableStatuses.includes(status.status)) {
+          try {
+            const data = await getContractData(id);
+            setContractData(data);
+          } catch (dataError) {
+            // Если данные не найдены (404), это нормально для некоторых статусов
+            if (dataError.response?.status === 404) {
+              // Данные еще не извлечены или контракт не обработан
+              setContractData(null);
+            } else {
+              // Другая ошибка при загрузке данных
+              console.error('Ошибка при загрузке данных контракта:', dataError);
+            }
+          }
+        }
+
+        // Здесь можно загрузить результаты валидации, если есть отдельный endpoint
+        // const validation = await getValidationResults(id);
+        // setValidationResults(validation);
+      } catch (error) {
+        if (error.response?.status === 404) {
+          dispatch(addNotification({
+            type: 'error',
+            message: 'Контракт не найден',
+          }));
+          navigate('/');
+        } else {
+          dispatch(addNotification({
+            type: 'error',
+            message: 'Ошибка при загрузке данных контракта',
+          }));
+        }
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    if (id) {
+      loadContractDetails();
+    }
+  }, [id, navigate, dispatch]);
+
+  const handleApprove = () => {
+    // TODO: Реализовать утверждение контракта
+    dispatch(addNotification({
+      type: 'info',
+      message: 'Функция утверждения будет реализована позже',
+    }));
+  };
+
+  const handleSendTo1C = () => {
+    // TODO: Реализовать отправку в 1С
+    dispatch(addNotification({
+      type: 'info',
+      message: 'Функция отправки в 1С будет реализована позже',
+    }));
+  };
+
+  const handleRetry = async () => {
+    try {
+      await retryContract(id);
+      dispatch(addNotification({
+        type: 'success',
+        message: 'Обработка контракта перезапущена',
+      }));
+      // Перезагружаем данные контракта
+      const status = await getContractStatus(id);
+      setContractStatus(status);
+    } catch (error) {
+      dispatch(addNotification({
+        type: 'error',
+        message: 'Ошибка при повторной обработке контракта',
+      }));
+    }
+  };
+
+  const handleShowLLMInfo = async () => {
+    setShowLLMInfo(true);
+    setLoadingLLMInfo(true);
+    try {
+      const info = await getLLMInfo(id);
+      setLlmInfo(info);
+    } catch (error) {
+      dispatch(addNotification({
+        type: 'error',
+        message: 'Ошибка при загрузке информации о запросах LLM',
+      }));
+    } finally {
+      setLoadingLLMInfo(false);
+    }
+  };
+
+  if (loading) {
+    return (
+      <div className="flex justify-center items-center py-12">
+        <LoadingSpinner size="lg" />
+      </div>
+    );
+  }
+
+  if (!contractStatus) {
+    return (
+      <div className="text-center py-12">
+        <p className="text-gray-500">Контракт не найден</p>
+      </div>
+    );
+  }
+
+  // Показываем сообщение, если данные еще не извлечены
+  const isProcessing = ['pending', 'processing'].includes(contractStatus.status);
+  const dataNotAvailable = !contractData && !isProcessing;
+
+  const getStatusColor = (status) => {
+    const colors = {
+      completed: 'bg-green-100 text-green-800',
+      failed: 'bg-red-100 text-red-800',
+      validation_failed: 'bg-red-100 text-red-800',
+      validation_passed: 'bg-green-100 text-green-800',
+    };
+    return colors[status] || 'bg-gray-100 text-gray-800';
+  };
+
+  return (
+    <div className="space-y-6">
+      {/* Заголовок и действия */}
+      <div className="flex justify-between items-center">
+        <div>
+          <h2 className="text-2xl font-bold text-gray-900">
+            Детали контракта #{id}
+          </h2>
+          <p className="text-sm text-gray-500 mt-1">
+            Статус:{' '}
+            <span
+              className={`inline-flex px-2 py-1 text-xs font-semibold rounded-full ${getStatusColor(
+                contractStatus.status
+              )}`}
+            >
+              {contractStatus.status}
+            </span>
+          </p>
+        </div>
+        <div className="flex space-x-3">
+          <button
+            onClick={() => navigate(-1)}
+            className="px-4 py-2 border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-50 transition-colors"
+          >
+            Назад
+          </button>
+          <button
+            onClick={handleShowLLMInfo}
+            className="px-4 py-2 bg-gray-600 text-white rounded-lg hover:bg-gray-700 transition-colors"
+          >
+            Инфо
+          </button>
+          {contractStatus.status === 'failed' && (
+            <button
+              onClick={handleRetry}
+              className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors"
+            >
+              Повторить обработку
+            </button>
+          )}
+          {contractStatus.status === 'validation_passed' && (
+            <>
+              <button
+                onClick={handleApprove}
+                className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors"
+              >
+                Утвердить
+              </button>
+              <button
+                onClick={handleSendTo1C}
+                className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+              >
+                Отправить в 1С
+              </button>
+            </>
+          )}
+        </div>
+      </div>
+
+      {/* Результаты валидации */}
+      {validationResults && (
+        <ValidationResults results={validationResults} />
+      )}
+
+      {/* Сообщение о процессе обработки */}
+      {isProcessing && (
+        <div className="bg-blue-50 border border-blue-200 rounded-lg p-6">
+          <div className="flex items-center">
+            <LoadingSpinner size="sm" />
+            <div className="ml-4">
+              <h3 className="text-lg font-semibold text-blue-900">
+                Обработка контракта
+              </h3>
+              <p className="text-sm text-blue-700 mt-1">
+                Контракт находится в процессе обработки. Данные будут доступны после завершения.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Сообщение об отсутствии данных */}
+      {dataNotAvailable && (
+        <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-6">
+          <h3 className="text-lg font-semibold text-yellow-900">
+            Данные контракта недоступны
+          </h3>
+          <p className="text-sm text-yellow-700 mt-1">
+            Данные контракта еще не были извлечены или произошла ошибка при обработке.
+          </p>
+        </div>
+      )}
+
+      {/* Основные данные контракта */}
+      {contractData && (
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+        <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
+          <h3 className="text-lg font-semibold text-gray-900 mb-4">
+            Информация о контрагенте
+          </h3>
+          <div className="space-y-3">
+            <div>
+              <span className="text-sm font-medium text-gray-600">ИНН:</span>
+              <span className="ml-2 text-gray-900">{contractData.inn}</span>
+            </div>
+            {contractData.kpp && (
+              <div>
+                <span className="text-sm font-medium text-gray-600">КПП:</span>
+                <span className="ml-2 text-gray-900">{contractData.kpp}</span>
+              </div>
+            )}
+            <div>
+              <span className="text-sm font-medium text-gray-600">
+                Полное наименование:
+              </span>
+              <span className="ml-2 text-gray-900">
+                {contractData.full_name}
+              </span>
+            </div>
+            {contractData.short_name && (
+              <div>
+                <span className="text-sm font-medium text-gray-600">
+                  Краткое наименование:
+                </span>
+                <span className="ml-2 text-gray-900">
+                  {contractData.short_name}
+                </span>
+              </div>
+            )}
+            <div>
+              <span className="text-sm font-medium text-gray-600">
+                Тип юридического лица:
+              </span>
+              <span className="ml-2 text-gray-900">
+                {contractData.legal_entity_type}
+              </span>
+            </div>
+          </div>
+        </div>
+
+        <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
+          <h3 className="text-lg font-semibold text-gray-900 mb-4">
+            Информация о договоре
+          </h3>
+          <div className="space-y-3">
+            {contractData.contract_name && (
+              <div>
+                <span className="text-sm font-medium text-gray-600">
+                  Наименование договора:
+                </span>
+                <span className="ml-2 text-gray-900">
+                  {contractData.contract_name}
+                </span>
+              </div>
+            )}
+            {contractData.contract_number && (
+              <div>
+                <span className="text-sm font-medium text-gray-600">
+                  Номер договора:
+                </span>
+                <span className="ml-2 text-gray-900">
+                  {contractData.contract_number}
+                </span>
+              </div>
+            )}
+            {contractData.contract_date && (
+              <div>
+                <span className="text-sm font-medium text-gray-600">
+                  Дата договора:
+                </span>
+                <span className="ml-2 text-gray-900">
+                  {new Date(contractData.contract_date).toLocaleDateString(
+                    'ru-RU'
+                  )}
+                </span>
+              </div>
+            )}
+            {contractData.contract_price && (
+              <div>
+                <span className="text-sm font-medium text-gray-600">
+                  Сумма договора:
+                </span>
+                <span className="ml-2 text-gray-900">
+                  {contractData.contract_price.toLocaleString('ru-RU')} ₽
+                </span>
+              </div>
+            )}
+            {contractData.vat_percent !== null && (
+              <div>
+                <span className="text-sm font-medium text-gray-600">НДС:</span>
+                <span className="ml-2 text-gray-900">
+                  {contractData.vat_percent}%
+                </span>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+      )}
+
+      {/* Дополнительные данные */}
+      {contractData && (
+        <DataViewer data={contractData} title="Полные данные контракта" />
+      )}
+
+      {/* История обработки */}
+      {contractStatus.processing_started_at && (
+        <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
+          <h3 className="text-lg font-semibold text-gray-900 mb-4">
+            История обработки
+          </h3>
+          <div className="space-y-2">
+            <div>
+              <span className="text-sm font-medium text-gray-600">
+                Начало обработки:
+              </span>
+              <span className="ml-2 text-gray-900">
+                {new Date(
+                  contractStatus.processing_started_at
+                ).toLocaleString('ru-RU')}
+              </span>
+            </div>
+            {contractStatus.processing_completed_at && (
+              <div>
+                <span className="text-sm font-medium text-gray-600">
+                  Завершение обработки:
+                </span>
+                <span className="ml-2 text-gray-900">
+                  {new Date(
+                    contractStatus.processing_completed_at
+                  ).toLocaleString('ru-RU')}
+                </span>
+              </div>
+            )}
+            {contractStatus.error_message && (
+              <div className="mt-4 p-4 bg-red-50 border border-red-200 rounded-lg">
+                <span className="text-sm font-medium text-red-800">
+                  Ошибка:
+                </span>
+                <span className="ml-2 text-red-700">
+                  {contractStatus.error_message}
+                </span>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Модальное окно с информацией о запросах LLM */}
+      {showLLMInfo && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg shadow-xl max-w-4xl w-full mx-4 max-h-[90vh] overflow-hidden flex flex-col">
+            <div className="px-6 py-4 border-b border-gray-200 flex justify-between items-center">
+              <h3 className="text-xl font-semibold text-gray-900">
+                Информация о запросах LLM
+              </h3>
+              <button
+                onClick={() => setShowLLMInfo(false)}
+                className="text-gray-400 hover:text-gray-600 transition-colors"
+              >
+                <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+            <div className="px-6 py-4 overflow-y-auto flex-1">
+              {loadingLLMInfo ? (
+                <div className="flex justify-center items-center py-12">
+                  <LoadingSpinner size="md" />
+                </div>
+              ) : llmInfo && llmInfo.requests && llmInfo.requests.length > 0 ? (
+                <div className="space-y-6">
+                  <div className="text-sm text-gray-600">
+                    Всего запросов: {llmInfo.total_requests}
+                  </div>
+                  {llmInfo.requests.map((request, index) => (
+                    <div key={index} className="border border-gray-200 rounded-lg p-4">
+                      <div className="flex justify-between items-start mb-3">
+                        <div>
+                          <h4 className="font-semibold text-gray-900">
+                            Запрос #{index + 1}
+                            {request.request_type === 'chunk' && (
+                              <span className="ml-2 text-sm text-gray-600">
+                                (Чанк {request.chunk_index} из {request.total_chunks})
+                              </span>
+                            )}
+                          </h4>
+                          <div className="text-sm text-gray-600 mt-1">
+                            Статус: <span className={`font-medium ${request.status === 'success' ? 'text-green-600' : 'text-red-600'}`}>
+                              {request.status === 'success' ? 'Успешно' : 'Ошибка'}
+                            </span>
+                          </div>
+                          {request.timestamp && (
+                            <div className="text-xs text-gray-500 mt-1">
+                              Время: {new Date(request.timestamp).toLocaleString('ru-RU')}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                      
+                      <div className="space-y-3">
+                        <div>
+                          <div className="text-sm font-medium text-gray-700 mb-1">
+                            Полный запрос к LLM:
+                          </div>
+                          <div className="bg-gray-50 rounded p-3 text-sm text-gray-800 font-mono whitespace-pre-wrap break-words max-h-96 overflow-y-auto border border-gray-200">
+                            <pre className="whitespace-pre-wrap break-words">{request.request_text || request.request_text_preview || 'Нет данных'}</pre>
+                          </div>
+                          <div className="text-xs text-gray-500 mt-1">
+                            Размер: {request.request_size?.toLocaleString('ru-RU')} символов
+                            {request.request_tokens_estimate && ` (~${request.request_tokens_estimate} токенов)`}
+                          </div>
+                        </div>
+                        
+                        {request.status === 'success' && request.response_data && (
+                          <div>
+                            <div className="text-sm font-medium text-gray-700 mb-1">
+                              Ответ LLM:
+                            </div>
+                            <div className="bg-green-50 rounded p-3 text-sm text-gray-800 max-h-60 overflow-y-auto">
+                              <pre className="whitespace-pre-wrap break-words">
+                                {JSON.stringify(request.response_data, null, 2)}
+                              </pre>
+                            </div>
+                            {request.response_size && (
+                              <div className="text-xs text-gray-500 mt-1">
+                                Размер ответа: {request.response_size?.toLocaleString('ru-RU')} символов
+                              </div>
+                            )}
+                          </div>
+                        )}
+                        
+                        {request.status === 'error' && request.error && (
+                          <div>
+                            <div className="text-sm font-medium text-red-700 mb-1">
+                              Ошибка:
+                            </div>
+                            <div className="bg-red-50 rounded p-3 text-sm text-red-800">
+                              {request.error}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="text-center py-12 text-gray-500">
+                  Информация о запросах LLM недоступна
+                </div>
+              )}
+            </div>
+            <div className="px-6 py-4 border-t border-gray-200 flex justify-end">
+              <button
+                onClick={() => setShowLLMInfo(false)}
+                className="px-4 py-2 bg-gray-600 text-white rounded-lg hover:bg-gray-700 transition-colors"
+              >
+                Закрыть
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+export default ContractDetails;

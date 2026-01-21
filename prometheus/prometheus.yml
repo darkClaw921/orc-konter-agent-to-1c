@@ -1,0 +1,29 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    monitor: 'sgr-agent-monitor'
+    environment: 'production'
+
+scrape_configs:
+  - job_name: 'sgr-backend'
+    static_configs:
+      - targets: ['backend:8000']
+    metrics_path: '/metrics'
+    scrape_interval: 15s
+    
+  - job_name: 'postgres'
+    static_configs:
+      - targets: ['postgres:5432']
+    scrape_interval: 30s
+      
+  - job_name: 'redis'
+    static_configs:
+      - targets: ['redis:6379']
+    scrape_interval: 30s
+      
+  - job_name: 'mcp-service'
+    static_configs:
+      - targets: ['mcp_service:9000']
+    metrics_path: '/metrics'
+    scrape_interval: 15s

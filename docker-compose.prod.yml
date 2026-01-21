@@ -1,0 +1,233 @@
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    image: sgr-agent-backend:latest
+    container_name: sgr_backend_prod
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql://sgr_user:${DB_PASSWORD}@postgres:5432/sgr_agent
+      - REDIS_URL=redis://redis:6379/0
+      - MCP_SERVICE_URL=http://mcp_service:9000
+      - LLM_PROVIDER=${LLM_PROVIDER:-openai}
+      - LLM_API_KEY=${LLM_API_KEY}
+      - LLM_MODEL=${LLM_MODEL:-gpt-4o-mini}
+      - ONEС_ODATA_URL=${ONEС_ODATA_URL}
+      - ONEС_USERNAME=${ONEС_USERNAME}
+      - ONEС_PASSWORD=${ONEС_PASSWORD}
+      - SECRET_KEY=${SECRET_KEY}
+      - DEBUG=false
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - LOG_FILE=/var/log/sgr-agent/app.log
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: always
+    networks:
+      - sgr-network
+    volumes:
+      - ./storage:/storage
+      - ./logs:/var/log/sgr-agent
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  celery_worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    image: sgr-agent-backend:latest
+    container_name: sgr_celery_worker_prod
+    environment:
+      - DATABASE_URL=postgresql://sgr_user:${DB_PASSWORD}@postgres:5432/sgr_agent
+      - REDIS_URL=redis://redis:6379/0
+      - MCP_SERVICE_URL=http://mcp_service:9000
+      - LLM_PROVIDER=${LLM_PROVIDER:-openai}
+      - LLM_API_KEY=${LLM_API_KEY}
+      - LLM_MODEL=${LLM_MODEL:-gpt-4o-mini}
+      - ONEС_ODATA_URL=${ONEС_ODATA_URL}
+      - ONEС_USERNAME=${ONEС_USERNAME}
+      - ONEС_PASSWORD=${ONEС_PASSWORD}
+      - SECRET_KEY=${SECRET_KEY}
+      - DEBUG=false
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - LOG_FILE=/var/log/sgr-agent/app.log
+      - STORAGE_PATH=/storage/contracts
+    command: celery -A app.tasks.celery_app worker --loglevel=info
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      backend:
+        condition: service_started
+    restart: always
+    networks:
+      - sgr-network
+    volumes:
+      - ./storage:/storage
+      - ./logs:/var/log/sgr-agent
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    image: sgr-agent-frontend:latest
+    container_name: sgr_frontend_prod
+    ports:
+      - "3000:3000"
+    environment:
+      - REACT_APP_API_URL=http://backend:8000
+      - NODE_ENV=production
+    depends_on:
+      - backend
+    restart: always
+    networks:
+      - sgr-network
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3000', (r) => {process.exit(r.statusCode === 200 ? 0 : 1)})"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  postgres:
+    image: postgres:14-alpine
+    container_name: sgr_postgres_prod
+    environment:
+      - POSTGRES_DB=sgr_agent
+      - POSTGRES_USER=sgr_user
+      - POSTGRES_PASSWORD=${DB_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: always
+    networks:
+      - sgr-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sgr_user"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: sgr_redis_prod
+    restart: always
+    networks:
+      - sgr-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  mcp_service:
+    build:
+      context: ./mcp_service
+      dockerfile: Dockerfile
+    image: sgr-agent-mcp:latest
+    container_name: sgr_mcp_service_prod
+    ports:
+      - "9000:9000"
+    environment:
+      - ONEС_ODATA_URL=${ONEС_ODATA_URL}
+      - ONEС_USERNAME=${ONEС_USERNAME}
+      - ONEС_PASSWORD=${ONEС_PASSWORD}
+    restart: always
+    networks:
+      - sgr-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: sgr_prometheus_prod
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+    restart: always
+    networks:
+      - sgr-network
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: sgr_grafana_prod
+    ports:
+      - "3001:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_SERVER_ROOT_URL=http://localhost:3001
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+    depends_on:
+      - prometheus
+    restart: always
+    networks:
+      - sgr-network
+
+  nginx:
+    image: nginx:alpine
+    container_name: sgr_nginx_prod
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/ssl:/etc/nginx/ssl:ro
+    depends_on:
+      - frontend
+      - backend
+    restart: always
+    networks:
+      - sgr-network
+
+  filebeat:
+    image: docker.elastic.co/beats/filebeat:8.11.0
+    container_name: sgr_filebeat_prod
+    user: root
+    volumes:
+      - ./filebeat/filebeat.yml:/usr/share/filebeat/filebeat.yml:ro
+      - ./logs:/var/log/sgr-agent:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      - ELASTICSEARCH_HOSTS=${ELASTICSEARCH_HOSTS:-http://elasticsearch:9200}
+      - ELASTICSEARCH_USERNAME=${ELASTICSEARCH_USERNAME:-}
+      - ELASTICSEARCH_PASSWORD=${ELASTICSEARCH_PASSWORD:-}
+    depends_on:
+      - backend
+    restart: always
+    networks:
+      - sgr-network
+
+volumes:
+  postgres_data:
+  prometheus_data:
+  grafana_data:
+
+networks:
+  sgr-network:
+    driver: bridge
