@@ -93,6 +93,8 @@ services:
     container_name: sgr_mcp_service
     ports:
       - "9000:9000"
+    volumes:
+      - ./storage:/app/storage
     env_file:
       - .env
     networks:

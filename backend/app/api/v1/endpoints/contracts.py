@@ -8,7 +8,7 @@ from fastapi import APIRouter, UploadFile, File, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.core.dependencies import get_current_user, get_optional_current_user
-from app.models.database import get_db, Contract, ContractData, ProcessingHistory
+from app.models.database import get_db, Contract, ContractData, ProcessingHistory, Counterparty1C
 from app.models.enums import ProcessingState
 from app.models.schemas import (
     ContractUploadResponse,
@@ -16,7 +16,8 @@ from app.models.schemas import (
     ContractDataResponse,
     ContractListResponse,
     ContractListItem,
-    ContractRawTextResponse
+    ContractRawTextResponse,
+    OneCInfoResponse
 )
 from app.services.document_validator import DocumentValidator
 from app.services.storage_service import StorageService
@@ -440,4 +441,132 @@ async def get_contract_raw_text(
         raw_text=raw_text,
         text_length=len(raw_text),
         extraction_method=extraction_method
+    )
+
+
+@router.get("/{contract_id}/1c-info", response_model=OneCInfoResponse)
+async def get_1c_info(
+    contract_id: int,
+    current_user: dict = Depends(get_optional_current_user),
+    db: Session = Depends(get_db)
+):
+    """Получить информацию о работе с 1С для контракта"""
+    
+    contract = db.query(Contract).filter(Contract.id == contract_id).first()
+    if not contract:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Contract not found"
+        )
+    
+    # Получаем данные контракта для ИНН
+    contract_data = db.query(ContractData).filter(
+        ContractData.contract_id == contract_id
+    ).first()
+    
+    searched_inn = None
+    if contract_data:
+        searched_inn = contract_data.inn
+    
+    # Получаем информацию о контрагенте в 1С
+    counterparty_1c = None
+    if contract_data:
+        counterparty_1c = db.query(Counterparty1C).filter(
+            Counterparty1C.contract_data_id == contract_data.id
+        ).first()
+    
+    # Получаем информацию из истории обработки о проверке и создании
+    check_history = db.query(ProcessingHistory).filter(
+        ProcessingHistory.contract_id == contract_id,
+        ProcessingHistory.event_type == '1c_check'
+    ).order_by(ProcessingHistory.created_at.desc()).first()
+    
+    create_history = db.query(ProcessingHistory).filter(
+        ProcessingHistory.contract_id == contract_id,
+        ProcessingHistory.event_type == '1c_create'
+    ).order_by(ProcessingHistory.created_at.desc()).first()
+    
+    # Используем информацию из истории обработки для поиска
+    search_inn_from_history = searched_inn
+    error_from_check = None
+    if check_history and check_history.event_details:
+        search_details = check_history.event_details
+        if isinstance(search_details, dict):
+            search_inn_from_history = search_details.get('inn') or search_inn_from_history
+            error_from_check = search_details.get('error')
+    
+    # Формируем информацию о найденном контрагенте
+    found_counterparty = None
+    if counterparty_1c:
+        # Если есть response_from_1c, используем его
+        if counterparty_1c.response_from_1c:
+            found_counterparty = counterparty_1c.response_from_1c
+        # Иначе формируем из базовых данных
+        elif counterparty_1c.entity_uuid:
+            found_counterparty = {
+                'uuid': counterparty_1c.entity_uuid,
+                'name': counterparty_1c.entity_name
+            }
+    
+    # Если нет данных в Counterparty1C, но есть в истории поиска, используем их
+    if not found_counterparty and check_history and check_history.event_details:
+        search_details = check_history.event_details
+        if isinstance(search_details, dict) and search_details.get('found') and search_details.get('counterparty_data'):
+            found_counterparty = search_details.get('counterparty_data')
+    
+    # Проверяем, был ли найден контрагент (если есть UUID, значит был найден или создан)
+    was_found = False
+    was_created = False
+    
+    # Проверяем по истории поиска
+    if check_history and check_history.event_details:
+        search_details = check_history.event_details
+        if isinstance(search_details, dict):
+            if search_details.get('found'):
+                was_found = True
+    
+    # Проверяем по Counterparty1C
+    if counterparty_1c and counterparty_1c.entity_uuid:
+        # Если есть UUID, проверяем статус
+        if counterparty_1c.status_1c:
+            if counterparty_1c.status_1c.value == 'CREATED':
+                was_created = True
+            elif counterparty_1c.status_1c.value == 'UPDATED':
+                was_found = True  # Обновлен = был найден
+        else:
+            # Если UUID есть, но статуса нет, считаем что найден
+            was_found = True
+    
+    # Проверяем по истории создания
+    if create_history and create_history.event_details:
+        create_details = create_history.event_details
+        if isinstance(create_details, dict):
+            if create_details.get('created'):
+                was_created = True
+    
+    # Используем ИНН из истории поиска, если он там есть
+    final_searched_inn = search_inn_from_history or searched_inn
+    
+    # Получаем ошибку из истории создания, если есть
+    error_from_create = None
+    if create_history and create_history.event_details:
+        create_details = create_history.event_details
+        if isinstance(create_details, dict):
+            error_from_create = create_details.get('error')
+    
+    # Объединяем ошибки из проверки и создания
+    final_error = error_from_check or error_from_create or (counterparty_1c.error_from_1c if counterparty_1c else None)
+    
+    return OneCInfoResponse(
+        contract_id=contract_id,
+        searched_inn=final_searched_inn,
+        found_counterparty=found_counterparty,
+        counterparty_uuid=counterparty_1c.entity_uuid if counterparty_1c else None,
+        counterparty_name=counterparty_1c.entity_name if counterparty_1c else None,
+        status_1c=counterparty_1c.status_1c.value if counterparty_1c and counterparty_1c.status_1c else None,
+        created_in_1c_at=counterparty_1c.created_in_1c_at if counterparty_1c else None,
+        response_from_1c=counterparty_1c.response_from_1c if counterparty_1c else None,
+        error_from_1c=final_error,
+        was_found=was_found,
+        was_created=was_created
     )

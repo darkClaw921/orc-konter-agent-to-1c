@@ -947,9 +947,56 @@ class AgentOrchestrator:
         )
         
         if self.oneс_service:
-            existing = await self.oneс_service.find_counterparty_by_inn(inn)
+            existing = None
+            search_error = None
             
-            if existing:
+            try:
+                existing = await self.oneс_service.find_counterparty_by_inn(inn)
+                
+                # Проверяем, есть ли ошибка в результате
+                if existing and isinstance(existing, dict) and existing.get('_error'):
+                    search_error = existing.get('_error')
+                    existing = None  # Очищаем результат, если есть ошибка
+            except Exception as e:
+                logger.error("Exception during counterparty search", 
+                           contract_id=state.contract_id,
+                           inn=inn,
+                           error=str(e))
+                search_error = str(e)
+            
+            # Сохраняем информацию о поиске в ProcessingHistory
+            if self.state_manager.db:
+                try:
+                    search_result = {
+                        'inn': inn,
+                        'found': existing is not None and not (isinstance(existing, dict) and existing.get('_error')),
+                        'counterparty_uuid': existing.get('uuid') if existing and isinstance(existing, dict) and not existing.get('_error') else None,
+                        'counterparty_data': existing if existing and isinstance(existing, dict) and not existing.get('_error') else None,
+                        'error': search_error
+                    }
+                    
+                    history_entry = ProcessingHistory(
+                        contract_id=state.contract_id,
+                        event_type='1c_check',
+                        event_status=EventStatus.ERROR if search_error else EventStatus.SUCCESS,
+                        event_message=f"Поиск контрагента по ИНН {inn}" + (f" - ошибка: {search_error}" if search_error else ""),
+                        event_details=search_result
+                    )
+                    self.state_manager.db.add(history_entry)
+                    self.state_manager.db.commit()
+                    logger.info("1C search info saved to DB",
+                               contract_id=state.contract_id,
+                               inn=inn,
+                               found=search_result['found'],
+                               has_error=search_error is not None)
+                except Exception as e:
+                    logger.error("Failed to save 1C search info to DB",
+                               contract_id=state.contract_id,
+                               error=str(e))
+                    if self.state_manager.db:
+                        self.state_manager.db.rollback()
+            
+            if existing and isinstance(existing, dict) and not existing.get('_error'):
                 state.existing_counterparty_id = existing.get('uuid')
                 logger.info("Counterparty already exists in 1C",
                            inn=inn,
@@ -971,13 +1018,52 @@ class AgentOrchestrator:
         )
         
         if self.oneс_service:
-            created_id = await self.oneс_service.create_counterparty(
-                state.extracted_data,
-                state.document_path
-            )
+            created_id = None
+            create_error = None
+            
+            try:
+                created_id = await self.oneс_service.create_counterparty(
+                    state.extracted_data,
+                    state.document_path
+                )
+            except Exception as e:
+                create_error = str(e)
+                logger.error("Failed to create counterparty in 1C",
+                           contract_id=state.contract_id,
+                           error=create_error)
+            
+            # Сохраняем информацию о создании в ProcessingHistory
+            if self.state_manager.db:
+                try:
+                    create_result = {
+                        'inn': state.extracted_data.get('inn'),
+                        'created': created_id is not None,
+                        'counterparty_uuid': created_id,
+                        'error': create_error
+                    }
+                    
+                    history_entry = ProcessingHistory(
+                        contract_id=state.contract_id,
+                        event_type='1c_create',
+                        event_status=EventStatus.SUCCESS if created_id else EventStatus.ERROR,
+                        event_message=f"Создание контрагента в 1С" + (f" - ошибка: {create_error}" if create_error else ""),
+                        event_details=create_result
+                    )
+                    self.state_manager.db.add(history_entry)
+                    self.state_manager.db.commit()
+                    logger.info("1C create info saved to DB",
+                               contract_id=state.contract_id,
+                               created=created_id is not None)
+                except Exception as e:
+                    logger.error("Failed to save 1C create info to DB",
+                               contract_id=state.contract_id,
+                               error=str(e))
+                    if self.state_manager.db:
+                        self.state_manager.db.rollback()
             
             state.created_counterparty_id = created_id
             
-            logger.info("Counterparty created successfully",
-                       contract_id=state.contract_id,
-                       counterparty_id=created_id)
+            if created_id:
+                logger.info("Counterparty created successfully",
+                           contract_id=state.contract_id,
+                           counterparty_id=created_id)

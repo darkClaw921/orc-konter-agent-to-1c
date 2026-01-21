@@ -83,3 +83,18 @@ class ContractRawTextResponse(BaseModel):
     raw_text: str
     text_length: int
     extraction_method: Optional[str] = None
+
+
+class OneCInfoResponse(BaseModel):
+    """Ответ с информацией о работе с 1С"""
+    contract_id: int
+    searched_inn: Optional[str] = None
+    found_counterparty: Optional[dict] = None
+    counterparty_uuid: Optional[str] = None
+    counterparty_name: Optional[str] = None
+    status_1c: Optional[str] = None
+    created_in_1c_at: Optional[datetime] = None
+    response_from_1c: Optional[dict] = None
+    error_from_1c: Optional[str] = None
+    was_found: bool = False
+    was_created: bool = False

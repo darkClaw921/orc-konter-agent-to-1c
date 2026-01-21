@@ -125,3 +125,13 @@ export const testMCP1C = async () => {
   const response = await api.get('/testing/test-mcp-1c');
   return response.data;
 };
+
+/**
+ * Получить информацию о работе с 1С для контракта
+ * @param {number} contractId - ID контракта
+ * @returns {Promise} Информация о работе с 1С
+ */
+export const get1CInfo = async (contractId) => {
+  const response = await api.get(`/contracts/${contractId}/1c-info`);
+  return response.data;
+};

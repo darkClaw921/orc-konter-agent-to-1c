@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useDispatch } from 'react-redux';
-import { getContractData, getContractStatus, retryContract, getLLMInfo } from '../services/contractService';
+import { getContractData, getContractStatus, retryContract, getLLMInfo, get1CInfo } from '../services/contractService';
 import { addNotification } from '../store/slices/uiSlice';
 import DataViewer from './DataViewer';
 import ValidationResults from './ValidationResults';
@@ -18,6 +18,9 @@ const ContractDetails = () => {
   const [showLLMInfo, setShowLLMInfo] = useState(false);
   const [llmInfo, setLlmInfo] = useState(null);
   const [loadingLLMInfo, setLoadingLLMInfo] = useState(false);
+  const [activeTab, setActiveTab] = useState('overview');
+  const [onecInfo, setOnecInfo] = useState(null);
+  const [loadingOnecInfo, setLoadingOnecInfo] = useState(false);
 
   useEffect(() => {
     const loadContractDetails = async () => {
@@ -78,6 +81,37 @@ const ContractDetails = () => {
       loadContractDetails();
     }
   }, [id, navigate, dispatch]);
+
+  useEffect(() => {
+    const loadOnecInfo = async () => {
+      if (activeTab === 'onec' && !onecInfo && !loadingOnecInfo && id) {
+        setLoadingOnecInfo(true);
+        try {
+          const info = await get1CInfo(id);
+          setOnecInfo(info);
+        } catch (error) {
+          console.error('Ошибка при загрузке информации о работе с 1С:', error);
+          // Устанавливаем объект с ошибкой для отображения
+          setOnecInfo({
+            contract_id: parseInt(id),
+            error_from_1c: error.response?.data?.detail || error.message || 'Ошибка при загрузке информации о работе с 1С',
+            was_found: false,
+            was_created: false
+          });
+          if (error.response?.status !== 404) {
+            dispatch(addNotification({
+              type: 'error',
+              message: 'Ошибка при загрузке информации о работе с 1С',
+            }));
+          }
+        } finally {
+          setLoadingOnecInfo(false);
+        }
+      }
+    };
+
+    loadOnecInfo();
+  }, [activeTab, id, onecInfo, loadingOnecInfo, dispatch]);
 
   const handleApprove = () => {
     // TODO: Реализовать утверждение контракта
@@ -218,6 +252,46 @@ const ContractDetails = () => {
         </div>
       </div>
 
+      {/* Вкладки */}
+      {contractData && (
+        <div className="bg-white rounded-lg shadow-sm border border-gray-200">
+          <div className="border-b border-gray-200">
+            <nav className="flex space-x-8 px-6" aria-label="Tabs">
+              <button
+                onClick={() => setActiveTab('overview')}
+                className={`py-4 px-1 border-b-2 font-medium text-sm ${
+                  activeTab === 'overview'
+                    ? 'border-blue-500 text-blue-600'
+                    : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+                }`}
+              >
+                Обзор
+              </button>
+              <button
+                onClick={() => setActiveTab('data')}
+                className={`py-4 px-1 border-b-2 font-medium text-sm ${
+                  activeTab === 'data'
+                    ? 'border-blue-500 text-blue-600'
+                    : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+                }`}
+              >
+                Данные
+              </button>
+              <button
+                onClick={() => setActiveTab('onec')}
+                className={`py-4 px-1 border-b-2 font-medium text-sm ${
+                  activeTab === 'onec'
+                    ? 'border-blue-500 text-blue-600'
+                    : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+                }`}
+              >
+                Работа с 1С
+              </button>
+            </nav>
+          </div>
+        </div>
+      )}
+
       {/* Результаты валидации */}
       {validationResults && (
         <ValidationResults results={validationResults} />
@@ -253,7 +327,7 @@ const ContractDetails = () => {
       )}
 
       {/* Основные данные контракта */}
-      {contractData && (
+      {contractData && activeTab === 'overview' && (
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
           <h3 className="text-lg font-semibold text-gray-900 mb-4">
@@ -360,8 +434,151 @@ const ContractDetails = () => {
       )}
 
       {/* Дополнительные данные */}
-      {contractData && (
+      {contractData && activeTab === 'data' && (
         <DataViewer data={contractData} title="Полные данные контракта" />
+      )}
+
+      {/* Информация о работе с 1С */}
+      {contractData && activeTab === 'onec' && (
+        <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
+          <h3 className="text-lg font-semibold text-gray-900 mb-4">
+            Информация о работе с 1С
+          </h3>
+          {loadingOnecInfo ? (
+            <div className="flex justify-center items-center py-12">
+              <LoadingSpinner size="md" />
+            </div>
+          ) : onecInfo ? (
+            <div className="space-y-6">
+              {/* Информация о поиске */}
+              <div className="border border-gray-200 rounded-lg p-4">
+                <h4 className="text-md font-semibold text-gray-900 mb-3">
+                  Поиск контрагента
+                </h4>
+                <div className="space-y-2">
+                  <div>
+                    <span className="text-sm font-medium text-gray-600">ИНН для поиска:</span>
+                    <span className="ml-2 text-gray-900 font-mono">
+                      {onecInfo.searched_inn || 'Не указан'}
+                    </span>
+                  </div>
+                  <div>
+                    <span className="text-sm font-medium text-gray-600">Результат поиска:</span>
+                    <span className={`ml-2 font-medium ${
+                      onecInfo.was_found ? 'text-green-600' : 
+                      onecInfo.was_created ? 'text-blue-600' : 
+                      'text-gray-600'
+                    }`}>
+                      {onecInfo.was_found ? 'Контрагент найден в 1С' : 
+                       onecInfo.was_created ? 'Контрагент создан в 1С' : 
+                       'Контрагент не найден'}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Информация о найденном/созданном контрагенте */}
+              {(onecInfo.was_found || onecInfo.was_created) && (
+                <div className="border border-gray-200 rounded-lg p-4">
+                  <h4 className="text-md font-semibold text-gray-900 mb-3">
+                    {onecInfo.was_found ? 'Найденный контрагент' : 'Созданный контрагент'}
+                  </h4>
+                  <div className="space-y-2">
+                    {onecInfo.counterparty_uuid && (
+                      <div>
+                        <span className="text-sm font-medium text-gray-600">UUID в 1С:</span>
+                        <span className="ml-2 text-gray-900 font-mono text-xs">
+                          {onecInfo.counterparty_uuid}
+                        </span>
+                      </div>
+                    )}
+                    {onecInfo.counterparty_name && (
+                      <div>
+                        <span className="text-sm font-medium text-gray-600">Наименование:</span>
+                        <span className="ml-2 text-gray-900">
+                          {onecInfo.counterparty_name}
+                        </span>
+                      </div>
+                    )}
+                    {onecInfo.status_1c && (
+                      <div>
+                        <span className="text-sm font-medium text-gray-600">Статус в 1С:</span>
+                        <span className={`ml-2 px-2 py-1 text-xs font-semibold rounded-full ${
+                          onecInfo.status_1c === 'CREATED' ? 'bg-green-100 text-green-800' :
+                          onecInfo.status_1c === 'UPDATED' ? 'bg-blue-100 text-blue-800' :
+                          'bg-red-100 text-red-800'
+                        }`}>
+                          {onecInfo.status_1c}
+                        </span>
+                      </div>
+                    )}
+                    {onecInfo.created_in_1c_at && (
+                      <div>
+                        <span className="text-sm font-medium text-gray-600">Дата создания в 1С:</span>
+                        <span className="ml-2 text-gray-900">
+                          {new Date(onecInfo.created_in_1c_at).toLocaleString('ru-RU')}
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* Данные из 1С */}
+              {onecInfo.found_counterparty && (
+                <div className="border border-gray-200 rounded-lg p-4">
+                  <h4 className="text-md font-semibold text-gray-900 mb-3">
+                    Данные контрагента из 1С
+                  </h4>
+                  <div className="bg-gray-50 rounded p-3 text-sm text-gray-800 max-h-96 overflow-y-auto">
+                    <pre className="whitespace-pre-wrap break-words">
+                      {JSON.stringify(onecInfo.found_counterparty, null, 2)}
+                    </pre>
+                  </div>
+                </div>
+              )}
+
+              {/* Ответ от 1С */}
+              {onecInfo.response_from_1c && (
+                <div className="border border-gray-200 rounded-lg p-4">
+                  <h4 className="text-md font-semibold text-gray-900 mb-3">
+                    Ответ от 1С
+                  </h4>
+                  <div className="bg-green-50 rounded p-3 text-sm text-gray-800 max-h-96 overflow-y-auto">
+                    <pre className="whitespace-pre-wrap break-words">
+                      {JSON.stringify(onecInfo.response_from_1c, null, 2)}
+                    </pre>
+                  </div>
+                </div>
+              )}
+
+              {/* Ошибка от 1С */}
+              {onecInfo.error_from_1c && (
+                <div className="border border-red-200 rounded-lg p-4 bg-red-50">
+                  <h4 className="text-md font-semibold text-red-900 mb-3">
+                    Ошибка при работе с 1С
+                  </h4>
+                  <div className="text-sm text-red-800 whitespace-pre-wrap break-words">
+                    {typeof onecInfo.error_from_1c === 'string' 
+                      ? onecInfo.error_from_1c 
+                      : JSON.stringify(onecInfo.error_from_1c, null, 2)}
+                  </div>
+                </div>
+              )}
+
+              {/* Сообщение, если информации нет */}
+              {!onecInfo.was_found && !onecInfo.was_created && !onecInfo.error_from_1c && (
+                <div className="text-center py-8 text-gray-500">
+                  Информация о работе с 1С недоступна. Возможно, обработка еще не завершена или не выполнялась.
+                </div>
+              )}
+            </div>
+          ) : (
+            <div className="text-center py-12 text-gray-500">
+              Информация о работе с 1С недоступна
+            </div>
+          )}
+        </div>
       )}
 
       {/* История обработки */}

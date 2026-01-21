@@ -46,10 +46,17 @@ class OneCService:
                                 counterparty_data = result.get("data", {})
                                 counterparty_data["uuid"] = result.get("uuid")
                                 return counterparty_data
+                        elif response_data.get("status") == "error":
+                            # Возвращаем специальный объект с ошибкой
+                            error_msg = response_data.get("error", "Unknown error")
+                            return {"_error": error_msg}
+                    else:
+                        error_text = await response.text()
+                        return {"_error": f"HTTP {response.status}: {error_text}"}
                     return None
         except Exception as e:
             logger.error("Failed to check counterparty in 1C", error=str(e), inn=inn)
-            return None
+            return {"_error": str(e)}
     
     async def create_counterparty(self, contract_data: Dict[str, Any], document_path: str) -> Optional[str]:
         """
@@ -65,7 +72,8 @@ class OneCService:
         try:
             async with aiohttp.ClientSession() as session:
                 # Определяем роль контрагента
-                role = contract_data.get("role", "").lower()
+                role_value = contract_data.get("role")
+                role = str(role_value or "").lower()
                 is_supplier = "поставщик" in role or "продавец" in role or "исполнитель" in role
                 is_buyer = "покупатель" in role or "заказчик" in role
                 
