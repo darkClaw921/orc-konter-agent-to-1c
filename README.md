@@ -35,7 +35,7 @@ docker-compose up -d
 
 Сервисы будут доступны по адресам:
 - Frontend: http://localhost:3000 (через frontend доступен Backend API через прокси)
-- PostgreSQL: localhost:5433
+- PostgreSQL: localhost:5434
 
 Остальные сервисы (Backend, MCP Service, Redis, Prometheus, Grafana, Jaeger) доступны только внутри Docker сети `sgr_network` и не имеют внешних портов.
 
