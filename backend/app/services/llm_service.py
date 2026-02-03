@@ -485,7 +485,7 @@ class LLMService:
         
         # Поля-списки, которые объединяются из всех чанков
         list_fields = {
-            'service_locations', 'locations', 'responsible_persons'
+            'service_locations', 'locations', 'responsible_persons', 'services'
         }
         
         # Начинаем с первого чанка
@@ -519,6 +519,9 @@ class LLMService:
                             elif field == 'responsible_persons':
                                 # Проверяем по имени
                                 item_key = item.get('name') or item.get('fio')
+                            elif field == 'services':
+                                # Проверяем по названию услуги
+                                item_key = item.get('name')
                             else:
                                 item_key = str(item)
                             
@@ -528,6 +531,8 @@ class LLMService:
                                         existing_key = existing.get('address') or existing.get('address_full')
                                     elif field == 'responsible_persons':
                                         existing_key = existing.get('name') or existing.get('fio')
+                                    elif field == 'services':
+                                        existing_key = existing.get('name')
                                     else:
                                         existing_key = str(existing)
                                     

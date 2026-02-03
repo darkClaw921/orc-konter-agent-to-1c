@@ -52,6 +52,7 @@ class ContractDataResponse(BaseModel):
     service_end_date: Optional[date] = None
     locations: Optional[List[dict]] = None
     responsible_persons: Optional[List[dict]] = None
+    services: Optional[List[dict]] = None  # список услуг из спецификации/таблиц
     customer: Optional[dict] = None  # информация о заказчике (Покупателе)
     contractor: Optional[dict] = None  # информация об исполнителе (Поставщике)
     extraction_confidence: Optional[Decimal] = None
@@ -98,3 +99,31 @@ class OneCInfoResponse(BaseModel):
     error_from_1c: Optional[str] = None
     was_found: bool = False
     was_created: bool = False
+
+
+class CreateIn1CRequest(BaseModel):
+    """Запрос на создание контрагента в 1С"""
+    contract_data: Optional[dict] = None  # Данные из LLM ответа, если не переданы - берутся из БД
+
+
+class CreateIn1CResponse(BaseModel):
+    """Ответ на создание контрагента в 1С"""
+    success: bool
+    counterparty_uuid: Optional[str] = None
+    agreement_uuid: Optional[str] = None
+    error: Optional[str] = None
+    message: str
+
+
+class AddNoteRequest(BaseModel):
+    """Запрос на добавление заметки к контрагенту"""
+    note_text: str = Field(..., description="Текст заметки для поля 'Представление'")
+    comment: Optional[str] = Field(None, description="Дополнительный комментарий для поля 'Комментарий'")
+
+
+class AddNoteResponse(BaseModel):
+    """Ответ на добавление заметки к контрагенту"""
+    success: bool
+    note_uuid: Optional[str] = None
+    error: Optional[str] = None
+    message: str

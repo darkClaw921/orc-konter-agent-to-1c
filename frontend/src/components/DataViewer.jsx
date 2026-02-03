@@ -41,6 +41,12 @@ const DataViewer = ({ data, title = 'Данные' }) => {
     reporting_forms: 'Формы отчетности',
     additional_conditions: 'Дополнительные условия',
     technical_info: 'Техническая информация',
+    services: 'Услуги по договору',
+    // Поля для услуг
+    unit: 'Единица измерения',
+    quantity: 'Количество',
+    unit_price: 'Цена за единицу',
+    total_price: 'Общая стоимость',
     // Поля для ответственных лиц
     name: 'ФИО',
     email: 'Email',
@@ -70,11 +76,13 @@ const DataViewer = ({ data, title = 'Данные' }) => {
       return (
         <ul className="list-disc list-inside space-y-1">
           {value.map((item, index) => (
-            <li key={index}>
+            <li key={index} className="break-words">
               {typeof item === 'object' ? (
-                <pre className="text-sm">{JSON.stringify(item, null, 2)}</pre>
+                <pre className="text-sm bg-gray-50 p-2 rounded overflow-auto max-w-full whitespace-pre-wrap break-words">
+                  {JSON.stringify(item, null, 2)}
+                </pre>
               ) : (
-                String(item)
+                <span className="break-words">{String(item)}</span>
               )}
             </li>
           ))}
@@ -83,7 +91,7 @@ const DataViewer = ({ data, title = 'Данные' }) => {
     }
     if (typeof value === 'object') {
       return (
-        <pre className="text-sm bg-gray-50 p-2 rounded overflow-auto">
+        <pre className="text-sm bg-gray-50 p-2 rounded overflow-auto max-w-full whitespace-pre-wrap break-words">
           {JSON.stringify(value, null, 2)}
         </pre>
       );
@@ -119,7 +127,17 @@ const DataViewer = ({ data, title = 'Данные' }) => {
       }
     }
     
-    return String(value);
+    // Для длинных строк добавляем переносы
+    const stringValue = String(value);
+    if (stringValue.length > 100) {
+      return (
+        <div className="break-words whitespace-pre-wrap">
+          {stringValue}
+        </div>
+      );
+    }
+    
+    return <span className="break-words">{stringValue}</span>;
   };
 
   const renderResponsiblePersons = (persons) => {
@@ -211,6 +229,70 @@ const DataViewer = ({ data, title = 'Данные' }) => {
                 )}
               </div>
             )}
+          </div>
+        ))}
+      </div>
+    );
+  };
+
+  const renderServices = (services) => {
+    if (!Array.isArray(services) || services.length === 0) {
+      return <span className="text-gray-400">—</span>;
+    }
+
+    return (
+      <div className="space-y-4">
+        {services.map((service, index) => (
+          <div key={index} className="bg-gray-50 rounded-lg p-4 border border-gray-200">
+            <div className="font-semibold text-gray-700 mb-3">
+              Услуга {index + 1}
+            </div>
+            <div className="space-y-2">
+              {service.name && (
+                <div>
+                  <span className="text-sm font-medium text-gray-600">Наименование:</span>
+                  <div className="ml-2 text-gray-900 break-words whitespace-pre-wrap mt-1">
+                    {service.name}
+                  </div>
+                </div>
+              )}
+              {service.description && (
+                <div>
+                  <span className="text-sm font-medium text-gray-600">Описание:</span>
+                  <div className="ml-2 text-gray-900 break-words whitespace-pre-wrap mt-1">
+                    {service.description}
+                  </div>
+                </div>
+              )}
+              {(service.quantity !== null && service.quantity !== undefined) && (
+                <div>
+                  <span className="text-sm font-medium text-gray-600">Количество:</span>
+                  <span className="ml-2 text-gray-900">
+                    {service.quantity} {service.unit || ''}
+                  </span>
+                </div>
+              )}
+              {service.unit_price !== null && service.unit_price !== undefined && (
+                <div>
+                  <span className="text-sm font-medium text-gray-600">Цена за единицу:</span>
+                  <span className="ml-2 text-gray-900">
+                    {typeof service.unit_price === 'number' 
+                      ? `${service.unit_price.toLocaleString('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ₽`
+                      : service.unit_price}
+                  </span>
+                </div>
+              )}
+              {service.total_price !== null && service.total_price !== undefined && (
+                <div>
+                  <span className="text-sm font-medium text-gray-600">Общая стоимость:</span>
+                  <span className="ml-2 text-gray-900">
+                    {typeof service.total_price === 'number'
+                      ? `${service.total_price.toLocaleString('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ₽`
+                      : service.total_price}
+                  </span>
+                </div>
+              )}
+            </div>
           </div>
         ))}
       </div>
@@ -353,6 +435,25 @@ const DataViewer = ({ data, title = 'Данные' }) => {
       );
     }
 
+    // Специальная обработка для services (услуги по договору)
+    if (key === 'services' && Array.isArray(value)) {
+      return (
+        <div
+          key={key}
+          className={`py-2 border-b border-gray-100 ${level > 0 ? 'ml-4' : ''}`}
+        >
+          <div className="flex flex-col">
+            <span className="font-medium text-gray-600 mb-2">
+              {translateField(key)}:
+            </span>
+            <div className="text-gray-900">
+              {renderServices(value)}
+            </div>
+          </div>
+        </div>
+      );
+    }
+
     if (typeof value === 'object' && !Array.isArray(value)) {
       return (
         <div key={key} className={level > 0 ? 'ml-4 mt-2' : ''}>
@@ -373,13 +474,13 @@ const DataViewer = ({ data, title = 'Данные' }) => {
         key={key}
         className={`py-2 border-b border-gray-100 ${level > 0 ? 'ml-4' : ''}`}
       >
-        <div className="flex justify-between items-start">
-          <span className="font-medium text-gray-600 min-w-[200px]">
+        <div className="flex justify-between items-start gap-4">
+          <span className="font-medium text-gray-600 min-w-[200px] flex-shrink-0">
             {translateField(key)}:
           </span>
-          <span className="text-gray-900 flex-1 text-right">
+          <div className="text-gray-900 flex-1 min-w-0 break-words">
             {formatValue(value, key)}
-          </span>
+          </div>
         </div>
       </div>
     );

@@ -7,8 +7,8 @@ from datetime import datetime
 from typing import Dict, Any, List
 
 from app.agent.state_manager import AgentState, StateManager
-from app.models.enums import ProcessingState, EventStatus
-from app.models.database import ProcessingHistory
+from app.models.enums import ProcessingState, EventStatus, OneCStatus
+from app.models.database import ProcessingHistory, Counterparty1C, ContractData
 from app.services.document_processor import DocumentProcessor
 from app.services.llm_service import LLMService
 from app.services.prompts import EXTRACT_CONTRACT_DATA_PROMPT, MERGE_CHUNKS_DATA_PROMPT
@@ -147,6 +147,33 @@ class AgentOrchestrator:
             if isinstance(service_desc, str) and len(service_desc) > 500:
                 service_desc = service_desc[:500] + "..."
             context_parts.append(f"- {service_desc}")
+            context_parts.append("")
+        
+        # Секция УСЛУГИ ИЗ СПЕЦИФИКАЦИИ
+        services = extracted_data.get('services')
+        if services and isinstance(services, list) and len(services) > 0:
+            context_parts.append("УСЛУГИ ИЗ СПЕЦИФИКАЦИИ:")
+            # Ограничиваем количество услуг для контекста (берем первые 10)
+            services_to_show = services[:10]
+            for idx, service in enumerate(services_to_show, start=1):
+                if isinstance(service, dict):
+                    service_info = []
+                    if service.get('name'):
+                        service_info.append(f"  {idx}. {service['name']}")
+                    if service.get('quantity') is not None:
+                        unit = service.get('unit', '')
+                        if unit:
+                            service_info.append(f"     Количество: {service['quantity']} {unit}")
+                        else:
+                            service_info.append(f"     Количество: {service['quantity']}")
+                    if service.get('unit_price') is not None:
+                        service_info.append(f"     Цена за единицу: {service['unit_price']}")
+                    if service.get('total_price') is not None:
+                        service_info.append(f"     Общая стоимость: {service['total_price']}")
+                    if service_info:
+                        context_parts.extend(service_info)
+            if len(services) > 10:
+                context_parts.append(f"  ... и еще {len(services) - 10} услуг")
             context_parts.append("")
         
         # Секция ДАТЫ ОКАЗАНИЯ УСЛУГ
@@ -584,6 +611,37 @@ class AgentOrchestrator:
                             accumulated_data['locations'] = existing_locations
                             accumulated_data['service_locations'] = existing_locations
                             
+                            # Объединяем услуги (добавляем уникальные)
+                            existing_services = accumulated_data.get('services', [])
+                            if not isinstance(existing_services, list):
+                                existing_services = []
+                            
+                            new_services = chunk_data.get('services', [])
+                            if isinstance(new_services, list):
+                                # Безопасное создание set названий услуг - проверяем что name это строка
+                                existing_service_names = set()
+                                for s in existing_services:
+                                    if isinstance(s, dict):
+                                        name = s.get('name')
+                                        if isinstance(name, str):
+                                            existing_service_names.add(name.lower())
+                                
+                                for service in new_services:
+                                    if isinstance(service, dict):
+                                        service_name = service.get('name')
+                                        if service_name:
+                                            # Преобразуем name в строку если это список
+                                            if isinstance(service_name, str):
+                                                name_key = service_name.lower()
+                                            else:
+                                                name_key = str(service_name).lower()
+                                            
+                                            if name_key and name_key not in existing_service_names:
+                                                existing_services.append(service)
+                                                existing_service_names.add(name_key)
+                            
+                            accumulated_data['services'] = existing_services
+                            
                             # Обновляем информацию о заказчике и исполнителе
                             if chunk_data.get('customer'):
                                 customer_data = chunk_data['customer']
@@ -930,16 +988,25 @@ class AgentOrchestrator:
             raise Exception("Extracted data not found")
         
         # Получаем ИНН из корневых полей или из customer/contractor
+        # Согласно правилам: из контракта выявить значение ИНН контрагента
         inn = None
+        inn_source = None
+        
         if 'inn' in state.extracted_data and state.extracted_data['inn']:
             inn = state.extracted_data['inn']
+            inn_source = 'root'
         elif 'customer' in state.extracted_data and isinstance(state.extracted_data['customer'], dict):
             inn = state.extracted_data['customer'].get('inn')
+            inn_source = 'customer'
         elif 'contractor' in state.extracted_data and isinstance(state.extracted_data['contractor'], dict):
             inn = state.extracted_data['contractor'].get('inn')
+            inn_source = 'contractor'
         
         if not inn:
             raise Exception("INN not found in extracted data (checked root, customer, and contractor fields)")
+        
+        # Сохраняем источник ИНН для использования при создании контрагента
+        state.counterparty_inn_source = inn_source
         
         await self.state_manager.update_status(
             state.contract_id,
@@ -969,17 +1036,26 @@ class AgentOrchestrator:
                 try:
                     search_result = {
                         'inn': inn,
+                        'inn_source': inn_source,  # Источник ИНН: 'root', 'customer', 'contractor'
+                        'search_scope': 'all_areas',  # Поиск выполняется по всем областям справочника Контрагенты
                         'found': existing is not None and not (isinstance(existing, dict) and existing.get('_error')),
                         'counterparty_uuid': existing.get('uuid') if existing and isinstance(existing, dict) and not existing.get('_error') else None,
                         'counterparty_data': existing if existing and isinstance(existing, dict) and not existing.get('_error') else None,
                         'error': search_error
                     }
                     
+                    # Формируем сообщение с указанием источника ИНН
+                    inn_source_text = {
+                        'root': 'корневые поля',
+                        'customer': 'заказчик (customer)',
+                        'contractor': 'исполнитель (contractor)'
+                    }.get(inn_source, 'неизвестный источник')
+                    
                     history_entry = ProcessingHistory(
                         contract_id=state.contract_id,
                         event_type='1c_check',
                         event_status=EventStatus.ERROR if search_error else EventStatus.SUCCESS,
-                        event_message=f"Поиск контрагента по ИНН {inn}" + (f" - ошибка: {search_error}" if search_error else ""),
+                        event_message=f"Поиск контрагента по ИНН {inn} (источник: {inn_source_text}, поиск по всем областям справочника)" + (f" - ошибка: {search_error}" if search_error else ""),
                         event_details=search_result
                     )
                     self.state_manager.db.add(history_entry)
@@ -987,6 +1063,8 @@ class AgentOrchestrator:
                     logger.info("1C search info saved to DB",
                                contract_id=state.contract_id,
                                inn=inn,
+                               inn_source=inn_source,
+                               search_scope='all_areas',
                                found=search_result['found'],
                                has_error=search_error is not None)
                 except Exception as e:
@@ -1003,7 +1081,14 @@ class AgentOrchestrator:
                            entity_uuid=existing.get('uuid'))
     
     async def _create_counterparty_in_1c(self, state: AgentState):
-        """Создать контрагента в 1С"""
+        """
+        Создать контрагента в 1С.
+        
+        Согласно правилам:
+        - Если по данному ИНН контрагент присутствует в справочнике, то добавлять новый элемент нельзя
+        - Если контрагент отсутствует, то создать новый элемент справочника Контрагенты
+        """
+        # Повторная проверка перед созданием (дополнительная защита)
         if state.existing_counterparty_id:
             logger.info("Counterparty already exists, skipping creation",
                        contract_id=state.contract_id,
@@ -1018,13 +1103,48 @@ class AgentOrchestrator:
         )
         
         if self.oneс_service:
-            created_id = None
+            created_result = None
             create_error = None
             
             try:
-                created_id = await self.oneс_service.create_counterparty(
-                    state.extracted_data,
-                    state.document_path
+                # Подготавливаем данные контрагента из правильного источника
+                # Используем данные из customer или contractor в зависимости от того,
+                # откуда был взят ИНН при проверке
+                counterparty_data = self._prepare_counterparty_data(state)
+                
+                # Повторная проверка перед созданием (согласно правилам)
+                inn = counterparty_data.get('inn')
+                if inn:
+                    existing = await self.oneс_service.find_counterparty_by_inn(inn)
+                    # Проверяем результат: если есть ошибка или контрагент не найден, продолжаем создание
+                    # Если контрагент найден (есть uuid и нет ошибки), пропускаем создание
+                    if existing and isinstance(existing, dict):
+                        # Проверяем наличие ошибки (ключ _error присутствует)
+                        has_error = '_error' in existing
+                        # Проверяем наличие uuid (признак найденного контрагента)
+                        has_uuid = existing.get('uuid') is not None
+                        
+                        if has_uuid and not has_error:
+                            logger.warning("Counterparty found during final check before creation, skipping",
+                                          contract_id=state.contract_id,
+                                          inn=inn,
+                                          existing_uuid=existing.get('uuid'))
+                            state.existing_counterparty_id = existing.get('uuid')
+                            return
+                        elif has_error:
+                            # Если была ошибка при проверке, логируем но продолжаем создание
+                            # Ошибка означает, что проверка не удалась, но это не значит, что контрагент существует
+                            error_msg = existing.get('_error', 'Unknown error')
+                            logger.warning("Error during final check before creation, proceeding with creation",
+                                         contract_id=state.contract_id,
+                                         inn=inn,
+                                         error=error_msg)
+                    # Если existing is None или не dict, контрагент не найден - продолжаем создание
+                
+                created_result = await self.oneс_service.create_counterparty(
+                    counterparty_data,
+                    state.document_path,
+                    raw_text=state.raw_text
                 )
             except Exception as e:
                 create_error = str(e)
@@ -1032,11 +1152,21 @@ class AgentOrchestrator:
                            contract_id=state.contract_id,
                            error=create_error)
             
-            # Сохраняем информацию о создании в ProcessingHistory
+            # Извлекаем UUID и данные из результата
+            created_id = None
+            entity_data = None
+            if created_result and isinstance(created_result, dict):
+                created_id = created_result.get('uuid')
+                entity_data = created_result.get('entity')
+            
+            # Сохраняем информацию о создании в ProcessingHistory и Counterparty1C
             if self.state_manager.db:
                 try:
-                    create_result = {
-                        'inn': state.extracted_data.get('inn'),
+                    # Используем ИНН из подготовленных данных
+                    counterparty_data = self._prepare_counterparty_data(state)
+                    create_result_details = {
+                        'inn': counterparty_data.get('inn'),
+                        'inn_source': state.counterparty_inn_source,
                         'created': created_id is not None,
                         'counterparty_uuid': created_id,
                         'error': create_error
@@ -1047,9 +1177,57 @@ class AgentOrchestrator:
                         event_type='1c_create',
                         event_status=EventStatus.SUCCESS if created_id else EventStatus.ERROR,
                         event_message=f"Создание контрагента в 1С" + (f" - ошибка: {create_error}" if create_error else ""),
-                        event_details=create_result
+                        event_details=create_result_details
                     )
                     self.state_manager.db.add(history_entry)
+                    
+                    # Сохраняем данные в Counterparty1C
+                    if created_id:
+                        # Получаем ContractData для связи
+                        contract_data = self.state_manager.db.query(ContractData).filter(
+                            ContractData.contract_id == state.contract_id
+                        ).first()
+                        
+                        if contract_data:
+                            # Извлекаем наименование из entity_data
+                            entity_name = None
+                            if entity_data:
+                                # Пытаемся извлечь наименование из разных возможных полей
+                                entity_name = (
+                                    entity_data.get('Description') or
+                                    entity_data.get('Наименование') or
+                                    entity_data.get('НаименованиеПолное') or
+                                    counterparty_data.get('full_name') or
+                                    counterparty_data.get('short_name')
+                                )
+                            
+                            # Проверяем, существует ли уже запись
+                            counterparty_1c = self.state_manager.db.query(Counterparty1C).filter(
+                                Counterparty1C.contract_data_id == contract_data.id
+                            ).first()
+                            
+                            if counterparty_1c:
+                                # Обновляем существующую запись
+                                counterparty_1c.entity_uuid = created_id
+                                counterparty_1c.entity_name = entity_name
+                                counterparty_1c.status_1c = OneCStatus.CREATED
+                                counterparty_1c.created_in_1c_at = datetime.now()
+                                counterparty_1c.response_from_1c = entity_data
+                                if create_error:
+                                    counterparty_1c.error_from_1c = create_error
+                            else:
+                                # Создаем новую запись
+                                counterparty_1c = Counterparty1C(
+                                    contract_data_id=contract_data.id,
+                                    entity_uuid=created_id,
+                                    entity_name=entity_name,
+                                    status_1c=OneCStatus.CREATED,
+                                    created_in_1c_at=datetime.now(),
+                                    response_from_1c=entity_data,
+                                    error_from_1c=create_error
+                                )
+                                self.state_manager.db.add(counterparty_1c)
+                    
                     self.state_manager.db.commit()
                     logger.info("1C create info saved to DB",
                                contract_id=state.contract_id,
@@ -1067,3 +1245,88 @@ class AgentOrchestrator:
                 logger.info("Counterparty created successfully",
                            contract_id=state.contract_id,
                            counterparty_id=created_id)
+    
+    def _prepare_counterparty_data(self, state: AgentState) -> Dict[str, Any]:
+        """
+        Подготовить данные контрагента для создания в 1С согласно правилам 2.1-2.8.
+        
+        Использует данные из customer или contractor в зависимости от того,
+        откуда был взят ИНН при проверке (сохранено в state.counterparty_inn_source).
+        """
+        extracted_data = state.extracted_data or {}
+        counterparty_data = {}
+        
+        # Определяем источник данных на основе того, откуда был взят ИНН
+        inn_source = state.counterparty_inn_source or 'root'
+        
+        # Базовые данные контрагента
+        if inn_source == 'customer' and 'customer' in extracted_data:
+            # Используем данные из customer
+            customer = extracted_data['customer']
+            if isinstance(customer, dict):
+                counterparty_data = {
+                    'inn': customer.get('inn'),
+                    'kpp': customer.get('kpp'),
+                    'full_name': customer.get('full_name'),
+                    'short_name': customer.get('short_name'),
+                    'legal_entity_type': customer.get('legal_entity_type'),
+                    'organizational_form': customer.get('organizational_form'),
+                    'role': 'Заказчик'  # customer = заказчик
+                }
+        elif inn_source == 'contractor' and 'contractor' in extracted_data:
+            # Используем данные из contractor
+            contractor = extracted_data['contractor']
+            if isinstance(contractor, dict):
+                counterparty_data = {
+                    'inn': contractor.get('inn'),
+                    'kpp': contractor.get('kpp'),
+                    'full_name': contractor.get('full_name'),
+                    'short_name': contractor.get('short_name'),
+                    'legal_entity_type': contractor.get('legal_entity_type'),
+                    'organizational_form': contractor.get('organizational_form'),
+                    'role': 'Поставщик'  # contractor = поставщик
+                }
+        else:
+            # Используем корневые поля (legacy формат)
+            counterparty_data = {
+                'inn': extracted_data.get('inn'),
+                'kpp': extracted_data.get('kpp'),
+                'full_name': extracted_data.get('full_name'),
+                'short_name': extracted_data.get('short_name'),
+                'legal_entity_type': extracted_data.get('legal_entity_type'),
+                'organizational_form': extracted_data.get('organizational_form'),
+                'role': extracted_data.get('role', '')
+            }
+        
+        # Добавляем дополнительные данные из контракта для правил 2.7, 2.8 и 2.9
+        counterparty_data.update({
+            'locations': extracted_data.get('locations') or extracted_data.get('service_locations'),
+            'responsible_persons': extracted_data.get('responsible_persons'),
+            'service_start_date': extracted_data.get('service_start_date'),
+            'service_end_date': extracted_data.get('service_end_date'),
+            'contract_name': extracted_data.get('contract_name'),
+            'contract_number': extracted_data.get('contract_number'),
+            'contract_date': extracted_data.get('contract_date'),
+            'contract_price': extracted_data.get('contract_price'),
+            'vat_percent': extracted_data.get('vat_percent'),
+            'vat_type': extracted_data.get('vat_type'),
+            'service_description': extracted_data.get('service_description'),
+            'payment_terms': extracted_data.get('payment_terms'),
+            'acceptance_procedure': extracted_data.get('acceptance_procedure'),
+            'specification_exists': extracted_data.get('specification_exists'),
+            'pricing_method': extracted_data.get('pricing_method'),
+            'reporting_forms': extracted_data.get('reporting_forms'),
+            'additional_conditions': extracted_data.get('additional_conditions'),
+            'technical_info': extracted_data.get('technical_info'),
+            'task_execution_term': extracted_data.get('task_execution_term'),
+            'customer': extracted_data.get('customer'),  # Для определения организации в заметке
+            'contractor': extracted_data.get('contractor'),  # Для определения организации в заметке
+            'raw_text': state.raw_text  # Для поиска фразы "протокол подведения итогов"
+        })
+        
+        logger.info("Prepared counterparty data for creation",
+                   contract_id=state.contract_id,
+                   inn_source=inn_source,
+                   has_inn=bool(counterparty_data.get('inn')))
+        
+        return counterparty_data

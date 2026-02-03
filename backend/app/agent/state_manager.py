@@ -23,6 +23,7 @@ class AgentState:
     existing_counterparty_id: Optional[str] = None
     created_counterparty_id: Optional[str] = None
     created_agreement_id: Optional[str] = None
+    counterparty_inn_source: Optional[str] = None  # Источник ИНН: 'root', 'customer', 'contractor'
     error_message: Optional[str] = None
     error_details: Optional[Dict[str, Any]] = None
     llm_requests: Optional[list] = None  # Список запросов и ответов LLM

@@ -113,6 +113,8 @@ def process_contract_task(self, contract_id: int, document_path: str):
                         contract_data.vat_type = state.extracted_data.get("vat_type")
                     if state.extracted_data.get("service_description"):
                         contract_data.service_description = state.extracted_data.get("service_description")
+                    if state.extracted_data.get("services"):
+                        contract_data.services = state.extracted_data.get("services")
                     if state.extracted_data.get("locations"):
                         contract_data.locations = state.extracted_data.get("locations")
                     if state.extracted_data.get("responsible_persons"):

@@ -135,3 +135,16 @@ export const get1CInfo = async (contractId) => {
   const response = await api.get(`/contracts/${contractId}/1c-info`);
   return response.data;
 };
+
+/**
+ * Создать контрагента в 1С с данными из LLM ответа или из БД
+ * @param {number} contractId - ID контракта
+ * @param {Object} contractData - Опциональные данные контракта из LLM ответа
+ * @returns {Promise} Результат создания контрагента в 1С
+ */
+export const createCounterpartyIn1C = async (contractId, contractData = null) => {
+  const response = await api.post(`/contracts/${contractId}/create-in-1c`, {
+    contract_data: contractData
+  });
+  return response.data;
+};

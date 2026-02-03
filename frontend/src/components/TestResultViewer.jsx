@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { getContractRawText, getContractData, getLLMInfo, get1CInfo } from '../services/contractService';
+import { getContractRawText, getContractData, getLLMInfo, get1CInfo, createCounterpartyIn1C } from '../services/contractService';
 import LoadingSpinner from './LoadingSpinner';
 import DataViewer from './DataViewer';
 
@@ -14,6 +14,8 @@ const TestResultViewer = ({ contractId, contractStatus, onClose }) => {
   const [loadingLLMInfo, setLoadingLLMInfo] = useState(false);
   const [loadingOnecInfo, setLoadingOnecInfo] = useState(false);
   const [error, setError] = useState(null);
+  const [creatingIn1C, setCreatingIn1C] = useState(false);
+  const [create1CResult, setCreate1CResult] = useState(null);
 
   useEffect(() => {
     if (contractId && activeTab === 'text' && !rawText && !loadingText) {
@@ -106,6 +108,50 @@ const TestResultViewer = ({ contractId, contractStatus, onClose }) => {
       pending: 'bg-yellow-100 text-yellow-800',
     };
     return colors[status] || 'bg-gray-100 text-gray-800';
+  };
+
+  const handleCreateIn1C = async (responseData) => {
+    if (!contractId || !responseData) {
+      setError('Недостаточно данных для создания контрагента в 1С');
+      return;
+    }
+
+    setCreatingIn1C(true);
+    setCreate1CResult(null);
+    setError(null);
+
+    try {
+      const result = await createCounterpartyIn1C(contractId, responseData);
+      setCreate1CResult(result);
+      
+      // Обновляем информацию о работе с 1С
+      if (result.success) {
+        // Перезагружаем информацию о 1С
+        await loadOnecInfo();
+      }
+    } catch (err) {
+      setError(err.response?.data?.detail || 'Ошибка при создании контрагента в 1С');
+      setCreate1CResult({
+        success: false,
+        error: err.response?.data?.detail || err.message || 'Unknown error',
+        message: 'Ошибка при создании контрагента в 1С'
+      });
+    } finally {
+      setCreatingIn1C(false);
+    }
+  };
+
+  // Находим последний запрос агрегации
+  const getLastAggregationRequest = () => {
+    if (!llmInfo || !llmInfo.requests) return null;
+    
+    // Ищем последний запрос с типом aggregation
+    for (let i = llmInfo.requests.length - 1; i >= 0; i--) {
+      if (llmInfo.requests[i].request_type === 'aggregation') {
+        return llmInfo.requests[i];
+      }
+    }
+    return null;
   };
 
   return (
@@ -261,35 +307,93 @@ const TestResultViewer = ({ contractId, contractStatus, onClose }) => {
                   <div className="text-sm text-gray-600">
                     Всего запросов: {llmInfo.total_requests}
                   </div>
-                  {llmInfo.requests.map((request, index) => (
-                    <div key={index} className="border border-gray-200 rounded-lg p-4">
-                      <div className="flex justify-between items-start mb-3">
-                        <div>
-                          <h4 className="font-semibold text-gray-900">
-                            Запрос #{index + 1}
-                            {request.request_type === 'chunk' && (
-                              <span className="ml-2 text-sm text-gray-600">
-                                (Чанк {request.chunk_index} из {request.total_chunks})
+                  
+                  {/* Результат создания в 1С */}
+                  {create1CResult && (
+                    <div className={`border rounded-lg p-4 ${
+                      create1CResult.success 
+                        ? 'border-green-200 bg-green-50' 
+                        : 'border-red-200 bg-red-50'
+                    }`}>
+                      <div className={`font-medium ${
+                        create1CResult.success ? 'text-green-800' : 'text-red-800'
+                      }`}>
+                        {create1CResult.success ? '✓ ' : '✗ '}
+                        {create1CResult.message}
+                      </div>
+                      {create1CResult.counterparty_uuid && (
+                        <div className="text-sm text-gray-700 mt-2">
+                          UUID контрагента: <span className="font-mono">{create1CResult.counterparty_uuid}</span>
+                        </div>
+                      )}
+                      {create1CResult.agreement_uuid && (
+                        <div className="text-sm text-gray-700 mt-1">
+                          UUID договора: <span className="font-mono">{create1CResult.agreement_uuid}</span>
+                        </div>
+                      )}
+                      {create1CResult.error && (
+                        <div className="text-sm text-red-700 mt-2">
+                          Ошибка: {create1CResult.error}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                  
+                  {llmInfo.requests.map((request, index) => {
+                    const isLastAggregation = request.request_type === 'aggregation' && 
+                                            request === getLastAggregationRequest();
+                    
+                    return (
+                      <div key={index} className="border border-gray-200 rounded-lg p-4">
+                        <div className="flex justify-between items-start mb-3">
+                          <div className="flex-1">
+                            <h4 className="font-semibold text-gray-900">
+                              Запрос #{index + 1}
+                              {request.request_type === 'chunk' && (
+                                <span className="ml-2 text-sm text-gray-600">
+                                  (Чанк {request.chunk_index} из {request.total_chunks})
+                                </span>
+                              )}
+                              {request.request_type === 'aggregation' && (
+                                <span className="ml-2 text-sm text-gray-600">
+                                  (Агрегация результатов)
+                                </span>
+                              )}
+                            </h4>
+                            <div className="text-sm text-gray-600 mt-1">
+                              Статус: <span className={`font-medium ${request.status === 'success' ? 'text-green-600' : 'text-red-600'}`}>
+                                {request.status === 'success' ? 'Успешно' : 'Ошибка'}
                               </span>
+                            </div>
+                            {request.timestamp && (
+                              <div className="text-xs text-gray-500 mt-1">
+                                Время: {new Date(request.timestamp).toLocaleString('ru-RU')}
+                              </div>
                             )}
-                            {request.request_type === 'aggregation' && (
-                              <span className="ml-2 text-sm text-gray-600">
-                                (Агрегация результатов)
-                              </span>
-                            )}
-                          </h4>
-                          <div className="text-sm text-gray-600 mt-1">
-                            Статус: <span className={`font-medium ${request.status === 'success' ? 'text-green-600' : 'text-red-600'}`}>
-                              {request.status === 'success' ? 'Успешно' : 'Ошибка'}
-                            </span>
                           </div>
-                          {request.timestamp && (
-                            <div className="text-xs text-gray-500 mt-1">
-                              Время: {new Date(request.timestamp).toLocaleString('ru-RU')}
+                          
+                          {/* Кнопка для последнего запроса агрегации */}
+                          {isLastAggregation && request.status === 'success' && request.response_data && (
+                            <div className="ml-4">
+                              <button
+                                onClick={() => handleCreateIn1C(request.response_data)}
+                                disabled={creatingIn1C}
+                                className={`px-4 py-2 rounded-lg font-medium text-sm transition-colors flex items-center ${
+                                  creatingIn1C
+                                    ? 'bg-gray-400 text-white cursor-not-allowed'
+                                    : 'bg-blue-600 text-white hover:bg-blue-700'
+                                }`}
+                              >
+                                {creatingIn1C && (
+                                  <div className="mr-2">
+                                    <LoadingSpinner size="sm" />
+                                  </div>
+                                )}
+                                {creatingIn1C ? 'Создание...' : 'Запустить работу с 1С'}
+                              </button>
                             </div>
                           )}
                         </div>
-                      </div>
                       
                       <div className="space-y-3">
                         <div>
@@ -335,7 +439,8 @@ const TestResultViewer = ({ contractId, contractStatus, onClose }) => {
                         )}
                       </div>
                     </div>
-                  ))}
+                    );
+                  })}
                 </div>
               ) : (
                 <div className="text-center py-12 text-gray-500">

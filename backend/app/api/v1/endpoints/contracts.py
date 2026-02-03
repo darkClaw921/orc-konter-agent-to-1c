@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.core.dependencies import get_current_user, get_optional_current_user
 from app.models.database import get_db, Contract, ContractData, ProcessingHistory, Counterparty1C
-from app.models.enums import ProcessingState
+from app.models.enums import ProcessingState, OneCStatus, EventStatus
 from app.models.schemas import (
     ContractUploadResponse,
     ContractStatusResponse,
@@ -17,11 +17,16 @@ from app.models.schemas import (
     ContractListResponse,
     ContractListItem,
     ContractRawTextResponse,
-    OneCInfoResponse
+    OneCInfoResponse,
+    CreateIn1CRequest,
+    CreateIn1CResponse,
+    AddNoteRequest,
+    AddNoteResponse
 )
 from app.services.document_validator import DocumentValidator
 from app.services.storage_service import StorageService
 from app.services.document_processor import DocumentProcessor
+from app.services.oneс_service import OneCService
 from app.tasks.processing_tasks import process_contract_task
 from app.utils.logging import get_logger
 
@@ -183,6 +188,7 @@ async def get_contract_data(
         vat_percent=contract_data.vat_percent,
         vat_type=contract_data.vat_type.value if contract_data.vat_type else None,
         service_description=contract_data.service_description,
+        services=contract_data.services,
         service_start_date=contract_data.service_start_date,
         service_end_date=contract_data.service_end_date,
         locations=contract_data.locations,
@@ -529,9 +535,9 @@ async def get_1c_info(
     if counterparty_1c and counterparty_1c.entity_uuid:
         # Если есть UUID, проверяем статус
         if counterparty_1c.status_1c:
-            if counterparty_1c.status_1c.value == 'CREATED':
+            if counterparty_1c.status_1c == OneCStatus.CREATED:
                 was_created = True
-            elif counterparty_1c.status_1c.value == 'UPDATED':
+            elif counterparty_1c.status_1c == OneCStatus.UPDATED:
                 was_found = True  # Обновлен = был найден
         else:
             # Если UUID есть, но статуса нет, считаем что найден
@@ -555,7 +561,15 @@ async def get_1c_info(
             error_from_create = create_details.get('error')
     
     # Объединяем ошибки из проверки и создания
-    final_error = error_from_check or error_from_create or (counterparty_1c.error_from_1c if counterparty_1c else None)
+    # ВАЖНО: Если контрагент успешно создан (was_created=True), не показываем ошибку проверки,
+    # так как она не критична - контрагент все равно был создан успешно
+    # Ошибка проверки может быть только информационной, если создание прошло успешно
+    if was_created:
+        # Если контрагент создан, показываем только ошибку создания (если есть)
+        final_error = error_from_create or (counterparty_1c.error_from_1c if counterparty_1c else None)
+    else:
+        # Если контрагент не создан, показываем все ошибки
+        final_error = error_from_check or error_from_create or (counterparty_1c.error_from_1c if counterparty_1c else None)
     
     return OneCInfoResponse(
         contract_id=contract_id,
@@ -570,3 +584,416 @@ async def get_1c_info(
         was_found=was_found,
         was_created=was_created
     )
+
+
+@router.post("/{contract_id}/create-in-1c", response_model=CreateIn1CResponse, status_code=status.HTTP_200_OK)
+async def create_counterparty_in_1c(
+    contract_id: int,
+    request: CreateIn1CRequest,
+    current_user: dict = Depends(get_optional_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Создать контрагента в 1С с данными из LLM ответа или из БД
+    
+    Если contract_data передан в запросе, используются эти данные.
+    Иначе данные берутся из ContractData в БД.
+    """
+    contract = db.query(Contract).filter(Contract.id == contract_id).first()
+    if not contract:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Contract not found"
+        )
+    
+    # Проверяем, существует ли файл
+    import os
+    if not os.path.exists(contract.file_path):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Contract file not found"
+        )
+    
+    # Получаем данные контракта
+    contract_data_dict = None
+    
+    if request.contract_data:
+        # Используем данные из запроса (из LLM ответа)
+        # ВАЖНО: Всегда используем customer (заказчик), как при обычной обработке
+        llm_data = request.contract_data
+        
+        # Определяем источник данных контрагента
+        # Приоритет: customer -> корневые поля (legacy формат)
+        counterparty_source = None
+        role = 'Заказчик'
+        
+        # Сначала пытаемся использовать customer (заказчик)
+        if llm_data.get('customer') and isinstance(llm_data.get('customer'), dict):
+            customer = llm_data.get('customer')
+            if customer.get('inn'):
+                counterparty_source = customer
+                role = 'Заказчик'
+                logger.info("Using customer data from LLM response", contract_id=contract_id)
+        
+        # Если customer не найден или не имеет inn, используем корневые поля (legacy формат)
+        if not counterparty_source and llm_data.get('inn'):
+            counterparty_source = llm_data
+            role = llm_data.get('role', 'Заказчик')
+            logger.info("Using root data from LLM response (legacy format)", contract_id=contract_id)
+        
+        if counterparty_source:
+            # Формируем данные контрагента из выбранного источника
+            contract_data_dict = {
+                'inn': counterparty_source.get('inn'),
+                'kpp': counterparty_source.get('kpp'),
+                'full_name': counterparty_source.get('full_name'),
+                'short_name': counterparty_source.get('short_name'),
+                'legal_entity_type': counterparty_source.get('legal_entity_type'),
+                'organizational_form': counterparty_source.get('organizational_form'),
+                'role': role,
+                'is_supplier': False,  # Всегда создаем заказчика
+                'is_buyer': True,      # Всегда создаем заказчика
+                # Дополнительные поля из корневого объекта
+                'contract_name': llm_data.get('contract_name'),
+                'contract_number': llm_data.get('contract_number'),
+                'contract_date': llm_data.get('contract_date'),
+                'contract_price': llm_data.get('contract_price'),
+                'vat_percent': llm_data.get('vat_percent'),
+                'vat_type': llm_data.get('vat_type'),
+                'service_description': llm_data.get('service_description'),
+                'services': llm_data.get('services'),
+                'service_start_date': llm_data.get('service_start_date'),
+                'service_end_date': llm_data.get('service_end_date'),
+                'locations': llm_data.get('locations') or llm_data.get('service_locations'),
+                'responsible_persons': llm_data.get('responsible_persons'),
+                'customer': llm_data.get('customer'),
+                'contractor': llm_data.get('contractor'),
+                'payment_terms': llm_data.get('payment_terms'),
+                'acceptance_procedure': llm_data.get('acceptance_procedure'),
+                'specification_exists': llm_data.get('specification_exists'),
+                'pricing_method': llm_data.get('pricing_method'),
+                'reporting_forms': llm_data.get('reporting_forms'),
+                'additional_conditions': llm_data.get('additional_conditions'),
+                'technical_info': llm_data.get('technical_info'),
+                'task_execution_term': llm_data.get('task_execution_term'),
+            }
+            
+            logger.info("Using contract data from LLM response", 
+                       contract_id=contract_id,
+                       has_inn=bool(contract_data_dict.get('inn')),
+                       role=role,
+                       counterparty_source='customer' if llm_data.get('customer') else 'root')
+        else:
+            logger.warning("Could not determine counterparty from LLM data", 
+                          contract_id=contract_id,
+                          has_customer=bool(llm_data.get('customer')),
+                          has_root_inn=bool(llm_data.get('inn')))
+    else:
+        # Берем данные из БД
+        contract_data_db = db.query(ContractData).filter(
+            ContractData.contract_id == contract_id
+        ).first()
+        
+        if not contract_data_db:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Contract data not found. Please provide contract_data in request or ensure contract was processed."
+            )
+        
+        # Преобразуем данные из БД в словарь
+        contract_data_dict = {
+            'inn': contract_data_db.inn,
+            'kpp': contract_data_db.kpp,
+            'full_name': contract_data_db.full_name,
+            'short_name': contract_data_db.short_name,
+            'legal_entity_type': contract_data_db.legal_entity_type.value if contract_data_db.legal_entity_type else None,
+            'organizational_form': contract_data_db.organizational_form,
+            'is_supplier': contract_data_db.is_supplier,
+            'is_buyer': contract_data_db.is_buyer,
+            'contract_name': contract_data_db.contract_name,
+            'contract_number': contract_data_db.contract_number,
+            'contract_date': contract_data_db.contract_date.isoformat() if contract_data_db.contract_date else None,
+            'contract_price': float(contract_data_db.contract_price) if contract_data_db.contract_price else None,
+            'vat_percent': float(contract_data_db.vat_percent) if contract_data_db.vat_percent else None,
+            'vat_type': contract_data_db.vat_type.value if contract_data_db.vat_type else None,
+            'service_description': contract_data_db.service_description,
+            'services': contract_data_db.services,
+            'service_start_date': contract_data_db.service_start_date.isoformat() if contract_data_db.service_start_date else None,
+            'service_end_date': contract_data_db.service_end_date.isoformat() if contract_data_db.service_end_date else None,
+            'locations': contract_data_db.locations,
+            'responsible_persons': contract_data_db.responsible_persons,
+            'customer': contract_data_db.customer,
+            'contractor': contract_data_db.contractor,
+        }
+        
+        # Определяем роль на основе is_supplier/is_buyer
+        if contract_data_db.is_supplier:
+            contract_data_dict['role'] = 'Поставщик'
+        elif contract_data_db.is_buyer:
+            contract_data_dict['role'] = 'Заказчик'
+        
+        logger.info("Using contract data from database", contract_id=contract_id)
+    
+    # Проверяем наличие данных и ИНН
+    if not contract_data_dict:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Could not extract contract data. Please ensure contract_data contains 'inn' field or 'customer'/'contractor' objects with 'inn' field."
+        )
+    
+    inn = contract_data_dict.get('inn')
+    if not inn:
+        # Пробуем найти ИНН в customer или contractor
+        customer = contract_data_dict.get('customer')
+        contractor = contract_data_dict.get('contractor')
+        
+        if customer and isinstance(customer, dict) and customer.get('inn'):
+            inn = customer.get('inn')
+            # Обновляем данные из customer
+            contract_data_dict.update({
+                'inn': customer.get('inn'),
+                'kpp': customer.get('kpp') or contract_data_dict.get('kpp'),
+                'full_name': customer.get('full_name') or contract_data_dict.get('full_name'),
+                'short_name': customer.get('short_name') or contract_data_dict.get('short_name'),
+                'legal_entity_type': customer.get('legal_entity_type') or contract_data_dict.get('legal_entity_type'),
+                'organizational_form': customer.get('organizational_form') or contract_data_dict.get('organizational_form'),
+                'role': 'Заказчик',
+                'is_buyer': True
+            })
+            logger.info("Extracted INN from customer object", contract_id=contract_id, inn=inn)
+        elif contractor and isinstance(contractor, dict) and contractor.get('inn'):
+            inn = contractor.get('inn')
+            # Обновляем данные из contractor
+            contract_data_dict.update({
+                'inn': contractor.get('inn'),
+                'kpp': contractor.get('kpp') or contract_data_dict.get('kpp'),
+                'full_name': contractor.get('full_name') or contract_data_dict.get('full_name'),
+                'short_name': contractor.get('short_name') or contract_data_dict.get('short_name'),
+                'legal_entity_type': contractor.get('legal_entity_type') or contract_data_dict.get('legal_entity_type'),
+                'organizational_form': contractor.get('organizational_form') or contract_data_dict.get('organizational_form'),
+                'role': 'Поставщик',
+                'is_supplier': True
+            })
+            logger.info("Extracted INN from contractor object", contract_id=contract_id, inn=inn)
+    
+    if not inn:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Contract data must contain 'inn' field. Check that 'inn' is present in root, 'customer', or 'contractor' object."
+        )
+    
+    # Получаем raw_text из файла
+    raw_text = None
+    try:
+        doc_processor = DocumentProcessor()
+        if doc_processor.load_document(contract.file_path):
+            raw_text = doc_processor.extract_text()
+    except Exception as e:
+        logger.warning("Failed to extract raw text for 1C creation", 
+                      contract_id=contract_id, 
+                      error=str(e))
+    
+    # Создаем контрагента в 1С
+    oneс_service = OneCService()
+    create_error = None
+    counterparty_uuid = None
+    agreement_uuid = None
+    entity_data = None
+    
+    try:
+        created_result = await oneс_service.create_counterparty(
+            contract_data_dict,
+            contract.file_path,
+            raw_text=raw_text
+        )
+        
+        if created_result and isinstance(created_result, dict):
+            counterparty_uuid = created_result.get('uuid')
+            entity_data = created_result.get('entity')
+            agreement_uuid = created_result.get('agreement_uuid')
+            
+            if counterparty_uuid:
+                # Сохраняем информацию о создании в ProcessingHistory и Counterparty1C
+                create_result_details = {
+                    'inn': contract_data_dict.get('inn'),
+                    'created': True,
+                    'counterparty_uuid': counterparty_uuid,
+                    'agreement_uuid': agreement_uuid,
+                    'error': None
+                }
+                
+                history_entry = ProcessingHistory(
+                    contract_id=contract_id,
+                    event_type='1c_create',
+                    event_status=EventStatus.SUCCESS,
+                    event_message="Создание контрагента в 1С (через API)",
+                    event_details=create_result_details
+                )
+                db.add(history_entry)
+                
+                # Сохраняем данные в Counterparty1C
+                contract_data_db = db.query(ContractData).filter(
+                    ContractData.contract_id == contract_id
+                ).first()
+                
+                if contract_data_db:
+                    # Извлекаем наименование из entity_data
+                    entity_name = None
+                    if entity_data:
+                        entity_name = (
+                            entity_data.get('Description') or
+                            entity_data.get('Наименование') or
+                            entity_data.get('НаименованиеПолное') or
+                            contract_data_dict.get('full_name') or
+                            contract_data_dict.get('short_name')
+                        )
+                    
+                    # Проверяем, существует ли уже запись
+                    counterparty_1c = db.query(Counterparty1C).filter(
+                        Counterparty1C.contract_data_id == contract_data_db.id
+                    ).first()
+                    
+                    if counterparty_1c:
+                        # Обновляем существующую запись
+                        counterparty_1c.entity_uuid = counterparty_uuid
+                        counterparty_1c.entity_name = entity_name
+                        counterparty_1c.status_1c = OneCStatus.CREATED
+                        counterparty_1c.created_in_1c_at = datetime.utcnow()
+                        counterparty_1c.response_from_1c = entity_data
+                        counterparty_1c.error_from_1c = None
+                    else:
+                        # Создаем новую запись
+                        counterparty_1c = Counterparty1C(
+                            contract_data_id=contract_data_db.id,
+                            entity_uuid=counterparty_uuid,
+                            entity_name=entity_name,
+                            status_1c=OneCStatus.CREATED,
+                            created_in_1c_at=datetime.utcnow(),
+                            response_from_1c=entity_data
+                        )
+                        db.add(counterparty_1c)
+                    
+                    db.commit()
+                    logger.info("Counterparty created in 1C via API",
+                               contract_id=contract_id,
+                               counterparty_uuid=counterparty_uuid,
+                               agreement_uuid=agreement_uuid)
+            else:
+                create_error = "Failed to create counterparty: no UUID returned"
+                logger.error("Failed to create counterparty - no UUID", contract_id=contract_id)
+        else:
+            create_error = "Failed to create counterparty: invalid response"
+            logger.error("Failed to create counterparty - invalid response", contract_id=contract_id)
+            
+    except Exception as e:
+        create_error = str(e)
+        logger.error("Failed to create counterparty in 1C",
+                    contract_id=contract_id,
+                    error=create_error,
+                    error_type=type(e).__name__,
+                    exc_info=True)
+        
+        # Сохраняем ошибку в ProcessingHistory
+        create_result_details = {
+            'inn': contract_data_dict.get('inn'),
+            'created': False,
+            'counterparty_uuid': None,
+            'error': create_error
+        }
+        
+        history_entry = ProcessingHistory(
+            contract_id=contract_id,
+            event_type='1c_create',
+            event_status=EventStatus.ERROR,
+            event_message=f"Создание контрагента в 1С (через API) - ошибка: {create_error}",
+            event_details=create_result_details
+        )
+        db.add(history_entry)
+        db.commit()
+    
+    if counterparty_uuid:
+        return CreateIn1CResponse(
+            success=True,
+            counterparty_uuid=counterparty_uuid,
+            agreement_uuid=agreement_uuid,
+            error=None,
+            message=f"Контрагент успешно создан в 1С. UUID: {counterparty_uuid}" + 
+                   (f", договор создан: {agreement_uuid}" if agreement_uuid else "")
+        )
+    else:
+        return CreateIn1CResponse(
+            success=False,
+            counterparty_uuid=None,
+            agreement_uuid=None,
+            error=create_error or "Unknown error",
+            message=f"Ошибка при создании контрагента в 1С: {create_error or 'Unknown error'}"
+        )
+
+
+@router.post("/counterparty/{counterparty_uuid}/note", response_model=AddNoteResponse, status_code=status.HTTP_200_OK)
+async def add_note_to_counterparty(
+    counterparty_uuid: str,
+    request: AddNoteRequest,
+    current_user: dict = Depends(get_optional_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Добавить заметку к контрагенту в 1С
+    
+    Args:
+        counterparty_uuid: UUID контрагента в 1С (из пути URL)
+        request: Данные заметки (note_text, comment)
+        current_user: Текущий пользователь (опционально)
+        db: Сессия базы данных
+        
+    Returns:
+        AddNoteResponse с результатом операции
+    """
+    onec_service = OneCService()
+    
+    try:
+        result = await onec_service.add_note_to_counterparty(
+            counterparty_uuid=counterparty_uuid,
+            note_text=request.note_text,
+            comment=request.comment
+        )
+        
+        if result and result.get('created'):
+            note_uuid = result.get('uuid')
+            logger.info("Note added to counterparty via API",
+                       counterparty_uuid=counterparty_uuid,
+                       note_uuid=note_uuid,
+                       user=current_user.get("username") if current_user else "anonymous")
+            
+            return AddNoteResponse(
+                success=True,
+                note_uuid=note_uuid,
+                error=None,
+                message=f"Заметка успешно добавлена к контрагенту. UUID заметки: {note_uuid}"
+            )
+        else:
+            error_msg = "Failed to add note: invalid response from MCP service"
+            logger.error("Failed to add note - invalid response",
+                        counterparty_uuid=counterparty_uuid)
+            
+            return AddNoteResponse(
+                success=False,
+                note_uuid=None,
+                error=error_msg,
+                message=f"Ошибка при добавлении заметки: {error_msg}"
+            )
+            
+    except Exception as e:
+        error_msg = str(e)
+        logger.error("Failed to add note to counterparty",
+                    counterparty_uuid=counterparty_uuid,
+                    error=error_msg,
+                    error_type=type(e).__name__,
+                    exc_info=True)
+        
+        return AddNoteResponse(
+            success=False,
+            note_uuid=None,
+            error=error_msg,
+            message=f"Ошибка при добавлении заметки к контрагенту: {error_msg}"
+        )
