@@ -165,15 +165,27 @@ class OneCClient:
         url = urljoin(self.base_url + '/', entity_type.lstrip('/'))
         
         headers = {
-            'Content-Type': 'application/json',
+            'Content-Type': 'application/json; charset=utf-8',
             'Accept': 'application/json'
         }
         
         if self.auth_header:
             headers['Authorization'] = self.auth_header
         
-        logger.info("Creating entity", urls=url, datas=data)
+        # Логируем данные без base64 для читаемости (первые 100 символов)
+        log_data = {k: (v[:100] + '...' if isinstance(v, str) and len(v) > 100 else v) 
+                    for k, v in data.items()}
+        logger.info("Creating entity", url=url, data_keys=list(data.keys()), 
+                   data_preview=log_data,
+                   data_size=len(str(data)))
         try:
+            # Используем json=data для автоматической сериализации
+            
+            print(f"data: {data}")
+            print(f"url: {url}")
+            print(f"headers: {headers}")
+            
+            
             async with self.session.post(url, json=data, headers=headers) as response:
                 if response.status in [201, 200]:
                     result = await response.json()
@@ -243,24 +255,114 @@ class OneCClient:
             raise
     
     async def attach_file(self, entity_type: str, uuid: str, 
-                         file_name: str, file_data: bytes) -> Dict[str, Any]:
-        """Прикрепить файл к сущности"""
+                         file_name: str, file_data: bytes,
+                         object_type: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Прикрепить файл к сущности через каталог Catalog_ХранилищеДополнительнойИнформации
+        
+        Args:
+            entity_type: Тип сущности (например, 'Catalog_Контрагенты' или 'Catalog_ДоговорыКонтрагентов')
+            uuid: UUID сущности
+            file_name: Имя файла
+            file_data: Данные файла в байтах
+            object_type: Тип объекта для поля Объект_Type (например, 'StandardODATA.Catalog_ДоговорыКонтрагентов')
+                        Если не указан, определяется автоматически на основе entity_type
+        
+        Returns:
+            Dict с результатом прикрепления файла
+        """
         
         logger.info("Attaching file to entity",
                    entity_type=entity_type,
                    uuid=uuid,
+                   file_name=file_name,
+                   file_size=len(file_data))
+        
+        if not self.session:
+            raise RuntimeError("Client not initialized. Call initialize() first.")
+        
+        # Определяем тип объекта для поля Объект_Type
+        if not object_type:
+            if entity_type == 'Catalog_ДоговорыКонтрагентов':
+                object_type = 'StandardODATA.Catalog_ДоговорыКонтрагентов'
+            elif entity_type == 'Catalog_Контрагенты':
+                object_type = 'StandardODATA.Catalog_Контрагенты'
+            else:
+                # Пробуем сформировать тип автоматически
+                object_type = f'StandardODATA.{entity_type}'
+        
+        # Определяем расширение файла
+        import os
+        file_extension = os.path.splitext(file_name)[1].lstrip('.').lower()
+        if not file_extension:
+            file_extension = 'bin'
+        
+        
+        # Кодируем файл в base64
+        import base64
+        file_base64 = base64.b64encode(file_data).decode('utf-8')
+        
+        # Проверяем размер base64 данных (может быть проблемой для больших файлов)
+        base64_size = len(file_base64)
+        file_size_mb = len(file_data) / (1024 * 1024)
+        base64_size_mb = base64_size / (1024 * 1024)
+        
+        logger.info("File encoding info",
+                   original_size=len(file_data),
+                   original_size_mb=round(file_size_mb, 2),
+                   base64_size=base64_size,
+                   base64_size_mb=round(base64_size_mb, 2),
                    file_name=file_name)
         
-        # В зависимости от версии 1С, прикрепление файлов может отличаться
-        # Здесь показан примерный алгоритм через OData
+        # Предупреждение для больших файлов (больше 5MB)
+        if file_size_mb > 5:
+            logger.warning("Large file detected - may cause issues with OData",
+                          file_size_mb=round(file_size_mb, 2),
+                          file_name=file_name)
         
-        # Обычно файлы прикрепляются через отдельный endpoint или через хранилище файлов
-        # Для базовой реализации возвращаем успешный результат
+        # Формируем описание (Description) из имени файла без расширения
+        description = os.path.splitext(file_name)[0]
+        if not description:
+            description = 'Файл'
         
-        # TODO: Реализовать реальное прикрепление файла в зависимости от версии 1С
-        # Это может быть через:
-        # - InformationRegister_Файлы
-        # - Catalog_Файлы
-        # - Или другой механизм в зависимости от конфигурации 1С
+        # Подготавливаем данные для создания записи в хранилище
+        # Структура соответствует формату хранения файлов в 1С
+        storage_data = {
+            'Description': description,
+            'ВидДанных': 'Файл',
+            'ИмяФайла': file_name,
+            'Объект': uuid,
+            'Объект_Type': object_type,
+            'Хранилище_Type': 'application/octet-stream',
+            # 'Хранилище_Base64Data': file_base64,
+            'ТекстФайла_Type': 'application/xml+xdto',
+            'ТекстФайла_Base64Data': "",
+            'ТипХраненияФайла': 'ВИнформационнойБазе',
+            'Том_Key': '00000000-0000-0000-0000-000000000000',
+            'Расширение': file_extension,
+            'Размер': str(len(file_data))
+        }
         
-        return {'attached': True, 'file_name': file_name, 'entity_type': entity_type, 'uuid': uuid}
+        # Создаем запись в каталоге Catalog_ХранилищеДополнительнойИнформации
+        result = await self.create_entity(
+            'Catalog_ХранилищеДополнительнойИнформации',
+            storage_data
+        )
+        file_uuid = result.get('Ref_Key')
+        logger.info("File attached successfully",
+                    entity_type=entity_type,
+                    entity_uuid=uuid,
+                    file_name=file_name,
+                    file_uuid=file_uuid,
+                    file_size=len(file_data))
+        
+        return {
+            'attached': True,
+            'file_name': file_name,
+            'file_uuid': file_uuid,
+            'entity_type': entity_type,
+            'entity_uuid': uuid,
+            'file_size': len(file_data)
+        }
+            
+        

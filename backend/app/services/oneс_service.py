@@ -196,9 +196,9 @@ class OneCService:
                             entity_data = result.get("entity", {})
                             agreement_uuid = result.get("agreement_uuid")
                             
-                            # Прикрепить файл контракта
+                            # Прикрепить файл контракта к договору (если создан) или к контрагенту
                             if counterparty_uuid and document_path:
-                                await self.attach_file(counterparty_uuid, document_path)
+                                await self.attach_file(counterparty_uuid, document_path, agreement_uuid=agreement_uuid)
                             
                             return {
                                 'uuid': counterparty_uuid,
@@ -219,13 +219,15 @@ class OneCService:
             logger.error("Failed to create counterparty in 1C", error=str(e))
             return None
     
-    async def attach_file(self, entity_uuid: str, file_path: str) -> bool:
+    async def attach_file(self, entity_uuid: str, file_path: str, agreement_uuid: Optional[str] = None) -> bool:
         """
         Прикрепить файл к сущности в 1С
         
         Args:
-            entity_uuid: UUID сущности в 1С
+            entity_uuid: UUID контрагента в 1С
             file_path: Путь к файлу
+            agreement_uuid: UUID договора (опционально) - если указан, файл прикрепляется к договору,
+                           иначе к контрагенту
             
         Returns:
             True если успешно
@@ -240,41 +242,63 @@ class OneCService:
             
             file_name = os.path.basename(file_path)
             
+            # Формируем параметры запроса
+            params = {
+                "counterparty_uuid": entity_uuid,
+                "file_path": file_path,
+                "file_name": file_name
+            }
+            
+            # Если указан agreement_uuid, добавляем его для прикрепления к договору
+            if agreement_uuid:
+                params["agreement_uuid"] = agreement_uuid
+                logger.info("Attaching file to agreement",
+                           agreement_uuid=agreement_uuid,
+                           counterparty_uuid=entity_uuid,
+                           file_name=file_name)
+            else:
+                logger.info("Attaching file to counterparty",
+                           counterparty_uuid=entity_uuid,
+                           file_name=file_name)
+            
             # Отправляем команду через JSON API
             async with aiohttp.ClientSession() as session:
                 async with session.post(
                     f"{self.mcp_service_url}/command",
                     json={
                         "command": "attach_file",
-                        "params": {
-                            "counterparty_uuid": entity_uuid,
-                            "file_path": file_path,
-                            "file_name": file_name
-                        }
+                        "params": params
                     },
                     timeout=aiohttp.ClientTimeout(total=self.timeout)
                 ) as response:
                     if response.status == 200:
                         response_data = await response.json()
                         if response_data.get("status") == "success":
-                            logger.info("File attached to counterparty", 
+                            target = "agreement" if agreement_uuid else "counterparty"
+                            logger.info(f"File attached to {target}", 
                                       entity_uuid=entity_uuid,
+                                      agreement_uuid=agreement_uuid,
                                       file_name=file_name)
                             return True
                         else:
                             logger.error("Failed to attach file", 
                                        error=response_data.get("error"),
-                                       entity_uuid=entity_uuid)
+                                       entity_uuid=entity_uuid,
+                                       agreement_uuid=agreement_uuid)
                             return False
                     else:
                         error_text = await response.text()
                         logger.error("Failed to attach file", 
                                    status=response.status,
                                    error=error_text,
-                                   entity_uuid=entity_uuid)
+                                   entity_uuid=entity_uuid,
+                                   agreement_uuid=agreement_uuid)
                         return False
         except Exception as e:
-            logger.error("Failed to attach file", error=str(e), entity_uuid=entity_uuid)
+            logger.error("Failed to attach file", 
+                        error=str(e), 
+                        entity_uuid=entity_uuid,
+                        agreement_uuid=agreement_uuid)
             return False
     
     async def add_note_to_counterparty(self, counterparty_uuid: str, note_text: str, comment: Optional[str] = None) -> Optional[Dict[str, Any]]:

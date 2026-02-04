@@ -1933,17 +1933,44 @@ class MCPServer:
         }
     
     async def _attach_file(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Прикрепить файл к контрагенту"""
+        """
+        Прикрепить файл к контрагенту или договору
+        
+        Параметры:
+            - counterparty_uuid (обязательный): UUID контрагента
+            - file_path (обязательный): Путь к файлу
+            - file_name (опциональный): Имя файла (если не указано, берется из file_path)
+            - agreement_uuid (опциональный): UUID договора - если указан, файл прикрепляется к договору,
+                                             иначе к контрагенту
+        """
         
         if not self.oneс_client:
             raise RuntimeError("1C client not initialized")
         
         counterparty_uuid = params.get('counterparty_uuid')
+        agreement_uuid = params.get('agreement_uuid')
         file_path = params.get('file_path')
         file_name = params.get('file_name')
         
-        if not counterparty_uuid or not file_path:
-            raise ValueError("counterparty_uuid and file_path are required")
+        if not file_path:
+            raise ValueError("file_path is required")
+        
+        # Если указан agreement_uuid, прикрепляем к договору, иначе к контрагенту
+        if agreement_uuid:
+            entity_uuid = agreement_uuid
+            entity_type = 'Catalog_ДоговорыКонтрагентов'
+            object_type = 'StandardODATA.Catalog_ДоговорыКонтрагентов'
+            logger.info("Attaching file to agreement",
+                       agreement_uuid=agreement_uuid,
+                       counterparty_uuid=counterparty_uuid)
+        elif counterparty_uuid:
+            entity_uuid = counterparty_uuid
+            entity_type = 'Catalog_Контрагенты'
+            object_type = 'StandardODATA.Catalog_Контрагенты'
+            logger.info("Attaching file to counterparty",
+                       counterparty_uuid=counterparty_uuid)
+        else:
+            raise ValueError("Either counterparty_uuid or agreement_uuid is required")
         
         # Нормализуем путь к файлу
         import os
@@ -1988,12 +2015,17 @@ class MCPServer:
         except Exception as e:
             raise ValueError(f"Failed to read file: {str(e)}")
         
+        # Определяем имя файла
+        if not file_name:
+            file_name = Path(normalized_path).name
+        
         # Прикрепить к хранилищу дополнительной информации
         result = await self.oneс_client.attach_file(
-            'Catalog_Контрагенты',
-            counterparty_uuid,
-            file_name or file_path.split('/')[-1],
-            file_data
+            entity_type,
+            entity_uuid,
+            file_name,
+            file_data,
+            object_type=object_type
         )
         
         return {'attached': True, 'result': result}
