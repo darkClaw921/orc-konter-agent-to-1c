@@ -3,6 +3,7 @@
 """
 import asyncio
 from datetime import datetime
+from decimal import Decimal
 
 from sqlalchemy.orm import Session
 
@@ -17,6 +18,7 @@ from app.services.storage_service import StorageService
 from app.services.validation_service import ValidationService
 from app.tasks.celery_app import celery_app
 from app.utils.logging import get_logger
+from app.utils.json_utils import convert_decimal_for_jsonb
 
 logger = get_logger(__name__)
 
@@ -105,24 +107,30 @@ def process_contract_task(self, contract_id: int, document_path: str):
                         contract_data.contract_name = state.extracted_data.get("contract_name")
                     if state.extracted_data.get("contract_number"):
                         contract_data.contract_number = state.extracted_data.get("contract_number")
-                    if state.extracted_data.get("contract_price"):
-                        contract_data.contract_price = state.extracted_data.get("contract_price")
-                    if state.extracted_data.get("vat_percent"):
-                        contract_data.vat_percent = state.extracted_data.get("vat_percent")
+                    # Преобразуем Decimal в float для Numeric полей
+                    if state.extracted_data.get("contract_price") is not None:
+                        price = state.extracted_data.get("contract_price")
+                        contract_data.contract_price = float(price) if isinstance(price, Decimal) else price
+                    if state.extracted_data.get("vat_percent") is not None:
+                        vat = state.extracted_data.get("vat_percent")
+                        contract_data.vat_percent = float(vat) if isinstance(vat, Decimal) else vat
                     if state.extracted_data.get("vat_type"):
                         contract_data.vat_type = state.extracted_data.get("vat_type")
                     if state.extracted_data.get("service_description"):
                         contract_data.service_description = state.extracted_data.get("service_description")
+                    # Преобразуем Decimal в float для JSONB полей
                     if state.extracted_data.get("services"):
-                        contract_data.services = state.extracted_data.get("services")
+                        contract_data.services = convert_decimal_for_jsonb(state.extracted_data.get("services"))
+                    if state.extracted_data.get("all_services"):
+                        contract_data.all_services = convert_decimal_for_jsonb(state.extracted_data.get("all_services"))
                     if state.extracted_data.get("locations"):
-                        contract_data.locations = state.extracted_data.get("locations")
+                        contract_data.locations = convert_decimal_for_jsonb(state.extracted_data.get("locations"))
                     if state.extracted_data.get("responsible_persons"):
-                        contract_data.responsible_persons = state.extracted_data.get("responsible_persons")
+                        contract_data.responsible_persons = convert_decimal_for_jsonb(state.extracted_data.get("responsible_persons"))
                     if state.extracted_data.get("customer"):
-                        contract_data.customer = state.extracted_data.get("customer")
+                        contract_data.customer = convert_decimal_for_jsonb(state.extracted_data.get("customer"))
                     if state.extracted_data.get("contractor"):
-                        contract_data.contractor = state.extracted_data.get("contractor")
+                        contract_data.contractor = convert_decimal_for_jsonb(state.extracted_data.get("contractor"))
                     
                     db.commit()
                 except Exception as db_error:

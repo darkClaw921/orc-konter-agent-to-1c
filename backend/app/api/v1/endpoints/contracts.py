@@ -21,14 +21,17 @@ from app.models.schemas import (
     CreateIn1CRequest,
     CreateIn1CResponse,
     AddNoteRequest,
-    AddNoteResponse
+    AddNoteResponse,
+    RefreshServicesResponse
 )
 from app.services.document_validator import DocumentValidator
 from app.services.storage_service import StorageService
 from app.services.document_processor import DocumentProcessor
 from app.services.oneс_service import OneCService
+from app.services.llm_service import LLMService
 from app.tasks.processing_tasks import process_contract_task
 from app.utils.logging import get_logger
+from app.utils.json_utils import convert_decimal_for_jsonb
 
 logger = get_logger(__name__)
 
@@ -189,6 +192,7 @@ async def get_contract_data(
         vat_type=contract_data.vat_type.value if contract_data.vat_type else None,
         service_description=contract_data.service_description,
         services=contract_data.services,
+        all_services=contract_data.all_services,
         service_start_date=contract_data.service_start_date,
         service_end_date=contract_data.service_end_date,
         locations=contract_data.locations,
@@ -997,3 +1001,136 @@ async def add_note_to_counterparty(
             error=error_msg,
             message=f"Ошибка при добавлении заметки к контрагенту: {error_msg}"
         )
+
+
+@router.post("/{contract_id}/refresh-services", response_model=RefreshServicesResponse, status_code=status.HTTP_200_OK)
+async def refresh_services(
+    contract_id: int,
+    current_user: dict = Depends(get_optional_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Обновить список услуг из документа через LLM
+
+    Повторно извлекает все услуги из документа с помощью специализированного промпта.
+    """
+    contract = db.query(Contract).filter(Contract.id == contract_id).first()
+    if not contract:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Contract not found"
+        )
+
+    # Проверяем, существует ли файл
+    import os
+    if not os.path.exists(contract.file_path):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Contract file not found"
+        )
+
+    # Извлекаем текст из документа
+    doc_processor = DocumentProcessor()
+    if not doc_processor.load_document(contract.file_path):
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to load document"
+        )
+
+    raw_text = doc_processor.extract_text()
+
+    # Определяем чанки
+    max_single_request_size = 64000
+    document_size = len(raw_text)
+
+    if document_size <= max_single_request_size:
+        chunks = [raw_text]
+    else:
+        chunks = doc_processor.get_chunks_for_llm()
+
+    # Извлекаем услуги через LLM
+    llm_service = LLMService()
+    services = []
+    error_msg = None
+
+    try:
+        services = await llm_service.extract_services_from_chunks(chunks)
+
+        # Сохраняем информацию о запросе в ProcessingHistory
+        request_info = {
+            "request_type": "services_extraction",
+            "chunks_count": len(chunks),
+            "services_count": len(services),
+            "timestamp": datetime.utcnow().isoformat(),
+            "status": "success"
+        }
+
+        history_entry = ProcessingHistory(
+            contract_id=contract_id,
+            event_type='llm_request',
+            event_status=EventStatus.SUCCESS,
+            event_message=f"Извлечение услуг (через API): найдено {len(services)} услуг",
+            event_details=request_info
+        )
+        db.add(history_entry)
+
+        # Обновляем all_services в ContractData
+        contract_data = db.query(ContractData).filter(
+            ContractData.contract_id == contract_id
+        ).first()
+
+        if contract_data:
+            # Обновляем поле all_services с преобразованием Decimal в float
+            contract_data.all_services = convert_decimal_for_jsonb(services)
+            db.commit()
+
+        logger.info("Services refreshed via API",
+                   contract_id=contract_id,
+                   services_count=len(services),
+                   user=current_user.get("username") if current_user else "anonymous")
+
+    except Exception as e:
+        error_msg = str(e)
+        logger.error("Failed to refresh services",
+                    contract_id=contract_id,
+                    error=error_msg,
+                    error_type=type(e).__name__,
+                    exc_info=True)
+
+        # Сохраняем ошибку в ProcessingHistory
+        request_info = {
+            "request_type": "services_extraction",
+            "chunks_count": len(chunks),
+            "timestamp": datetime.utcnow().isoformat(),
+            "status": "error",
+            "error": error_msg
+        }
+
+        history_entry = ProcessingHistory(
+            contract_id=contract_id,
+            event_type='llm_request',
+            event_status=EventStatus.ERROR,
+            event_message=f"Извлечение услуг (через API) - ошибка: {error_msg}",
+            event_details=request_info
+        )
+        db.add(history_entry)
+        db.commit()
+
+    if error_msg:
+        return RefreshServicesResponse(
+            success=False,
+            contract_id=contract_id,
+            services_count=0,
+            services=None,
+            error=error_msg,
+            message=f"Ошибка при извлечении услуг: {error_msg}"
+        )
+
+    return RefreshServicesResponse(
+        success=True,
+        contract_id=contract_id,
+        services_count=len(services),
+        services=services,
+        error=None,
+        message=f"Успешно извлечено {len(services)} услуг из документа"
+    )

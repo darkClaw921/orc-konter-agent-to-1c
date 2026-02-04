@@ -74,6 +74,7 @@ class ContractDataSchema(BaseModel):
     locations: Optional[List[ServiceLocation]] = Field(None, description="Адреса оказания услуг (алиас для service_locations)")
     responsible_persons: Optional[List[ResponsiblePerson]] = Field(None, description="Ответственные лица")
     services: Optional[List[Service]] = Field(None, description="Список услуг из спецификации/таблиц")
+    all_services: Optional[List[Service]] = Field(None, description="Все услуги по договору (отдельное извлечение)")
     # Информация о контрагентах
     customer: Optional[CounterpartyInfo] = Field(None, description="Информация о заказчике (Покупателе)")
     contractor: Optional[CounterpartyInfo] = Field(None, description="Информация об исполнителе (Поставщике)")

@@ -1,6 +1,7 @@
 """
 Интеграция с 1С через MCP
 """
+import asyncio
 import aiohttp
 from datetime import date, datetime
 from decimal import Decimal
@@ -43,10 +44,10 @@ def _serialize_for_json(obj: Any) -> Any:
 
 class OneCService:
     """Сервис для работы с 1С через MCP Service"""
-    
+
     def __init__(self):
         self.mcp_service_url = settings.MCP_SERVICE_URL
-        self.timeout = 30
+        self.timeout = 60  # Увеличен с 30 до 60 секунд для работы с 1С
     
     async def find_counterparty_by_inn(self, inn: str) -> Optional[Dict[str, Any]]:
         """
@@ -85,9 +86,17 @@ class OneCService:
                         error_text = await response.text()
                         return {"_error": f"HTTP {response.status}: {error_text}"}
                     return None
+        except asyncio.TimeoutError:
+            error_msg = f"Timeout after {self.timeout} seconds"
+            logger.error("Failed to check counterparty in 1C", error=error_msg, inn=inn, error_type="timeout")
+            return {"_error": error_msg}
+        except aiohttp.ClientError as e:
+            error_msg = f"HTTP client error: {type(e).__name__}: {str(e)}"
+            logger.error("Failed to check counterparty in 1C", error=error_msg, inn=inn, error_type="client_error")
+            return {"_error": error_msg}
         except Exception as e:
-            error_msg = str(e) if str(e) else "Unknown error during counterparty check"
-            logger.error("Failed to check counterparty in 1C", error=error_msg, inn=inn)
+            error_msg = str(e) if str(e) else f"Unknown error: {type(e).__name__}"
+            logger.error("Failed to check counterparty in 1C", error=error_msg, inn=inn, error_type=type(e).__name__)
             return {"_error": error_msg}
     
     async def create_counterparty(self, contract_data: Dict[str, Any], document_path: str, raw_text: Optional[str] = None) -> Optional[Dict[str, Any]]:
@@ -215,8 +224,14 @@ class OneCService:
                                    status=response.status,
                                    error=error_text)
                         return None
+        except asyncio.TimeoutError:
+            logger.error("Failed to create counterparty in 1C", error=f"Timeout after {self.timeout} seconds", error_type="timeout")
+            return None
+        except aiohttp.ClientError as e:
+            logger.error("Failed to create counterparty in 1C", error=f"HTTP client error: {type(e).__name__}: {str(e)}", error_type="client_error")
+            return None
         except Exception as e:
-            logger.error("Failed to create counterparty in 1C", error=str(e))
+            logger.error("Failed to create counterparty in 1C", error=str(e) or f"Unknown error: {type(e).__name__}", error_type=type(e).__name__)
             return None
     
     async def attach_file(self, entity_uuid: str, file_path: str, agreement_uuid: Optional[str] = None) -> bool:
@@ -294,9 +309,24 @@ class OneCService:
                                    entity_uuid=entity_uuid,
                                    agreement_uuid=agreement_uuid)
                         return False
+        except asyncio.TimeoutError:
+            logger.error("Failed to attach file",
+                        error=f"Timeout after {self.timeout} seconds",
+                        error_type="timeout",
+                        entity_uuid=entity_uuid,
+                        agreement_uuid=agreement_uuid)
+            return False
+        except aiohttp.ClientError as e:
+            logger.error("Failed to attach file",
+                        error=f"HTTP client error: {type(e).__name__}: {str(e)}",
+                        error_type="client_error",
+                        entity_uuid=entity_uuid,
+                        agreement_uuid=agreement_uuid)
+            return False
         except Exception as e:
-            logger.error("Failed to attach file", 
-                        error=str(e), 
+            logger.error("Failed to attach file",
+                        error=str(e) or f"Unknown error: {type(e).__name__}",
+                        error_type=type(e).__name__,
                         entity_uuid=entity_uuid,
                         agreement_uuid=agreement_uuid)
             return False
@@ -352,8 +382,21 @@ class OneCService:
                                    error=error_text,
                                    counterparty_uuid=counterparty_uuid)
                         return None
+        except asyncio.TimeoutError:
+            logger.error("Failed to add note to counterparty in 1C",
+                        error=f"Timeout after {self.timeout} seconds",
+                        error_type="timeout",
+                        counterparty_uuid=counterparty_uuid)
+            return None
+        except aiohttp.ClientError as e:
+            logger.error("Failed to add note to counterparty in 1C",
+                        error=f"HTTP client error: {type(e).__name__}: {str(e)}",
+                        error_type="client_error",
+                        counterparty_uuid=counterparty_uuid)
+            return None
         except Exception as e:
             logger.error("Failed to add note to counterparty in 1C",
-                        error=str(e),
+                        error=str(e) or f"Unknown error: {type(e).__name__}",
+                        error_type=type(e).__name__,
                         counterparty_uuid=counterparty_uuid)
             return None

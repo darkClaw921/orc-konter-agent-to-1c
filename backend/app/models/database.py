@@ -107,6 +107,7 @@ class ContractData(Base):
     locations = Column(JSONB)  # массив адресов оказания услуг
     responsible_persons = Column(JSONB)  # ФИО и контакты ответственных лиц
     services = Column(JSONB)  # список услуг из спецификации/таблиц: name, quantity, unit, unit_price, total_price, description
+    all_services = Column(JSONB)  # все услуги по договору (отдельное извлечение): name, quantity, unit, unit_price, total_price, description
     customer = Column(JSONB)  # информация о заказчике (Покупателе): inn, kpp, full_name, short_name, organizational_form, legal_entity_type
     contractor = Column(JSONB)  # информация об исполнителе (Поставщике): inn, kpp, full_name, short_name, organizational_form, legal_entity_type
     payment_terms = Column(Text)

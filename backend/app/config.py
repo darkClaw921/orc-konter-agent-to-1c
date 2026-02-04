@@ -14,7 +14,8 @@ class Settings(BaseSettings):
     DEBUG: bool = False
     
     # Database
-    DATABASE_URL: str = "postgresql://postgres:postgres@localhost:5432/sgr_agent_db"
+    # DATABASE_URL: str = "postgresql://postgres:postgres@localhost:5432/sgr_agent_db"
+    DATABASE_URL: str = "postgresql://postgres:postgres@localhost:5434/sgr_agent_db"
     
     # Redis
     REDIS_URL: str = "redis://localhost:6379/0"
@@ -28,9 +29,14 @@ class Settings(BaseSettings):
     LLM_PROVIDER: Literal["openai", "yandex", "ollama"] = "openai"
     LLM_API_KEY: str = ""
     LLM_MODEL: str = "gpt-4o-mini"
-    LLM_TEMPERATURE: float = 0.1
+    LLM_TEMPERATURE: float = 1
     LLM_MAX_TOKENS: int = 4000
-    LLM_REQUEST_TIMEOUT: int = 60
+    LLM_REQUEST_TIMEOUT: int = 300  # 5 минут для обработки больших документов
+
+    # Document Chunking Configuration
+    MAX_CHUNK_TOKENS: int = 8000  # Максимальное количество токенов на чанк
+    MAX_TABLE_CHUNK_TOKENS: int = 2000  # Максимальное количество токенов на чанк для таблиц
+    CHUNK_OVERLAP_TOKENS: int = 200  # Перекрытие между чанками в токенах
     
     # Storage
     STORAGE_TYPE: Literal["local", "minio"] = "local"

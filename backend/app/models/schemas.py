@@ -53,6 +53,7 @@ class ContractDataResponse(BaseModel):
     locations: Optional[List[dict]] = None
     responsible_persons: Optional[List[dict]] = None
     services: Optional[List[dict]] = None  # список услуг из спецификации/таблиц
+    all_services: Optional[List[dict]] = None  # все услуги по договору (отдельное извлечение)
     customer: Optional[dict] = None  # информация о заказчике (Покупателе)
     contractor: Optional[dict] = None  # информация об исполнителе (Поставщике)
     extraction_confidence: Optional[Decimal] = None
@@ -125,5 +126,15 @@ class AddNoteResponse(BaseModel):
     """Ответ на добавление заметки к контрагенту"""
     success: bool
     note_uuid: Optional[str] = None
+    error: Optional[str] = None
+    message: str
+
+
+class RefreshServicesResponse(BaseModel):
+    """Ответ на обновление услуг"""
+    success: bool
+    contract_id: int
+    services_count: int
+    services: Optional[List[dict]] = None
     error: Optional[str] = None
     message: str

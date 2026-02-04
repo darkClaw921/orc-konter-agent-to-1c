@@ -148,3 +148,13 @@ export const createCounterpartyIn1C = async (contractId, contractData = null) =>
   });
   return response.data;
 };
+
+/**
+ * Обновить список услуг из документа
+ * @param {number} contractId - ID контракта
+ * @returns {Promise} Результат извлечения услуг
+ */
+export const refreshServices = async (contractId) => {
+  const response = await api.post(`/contracts/${contractId}/refresh-services`);
+  return response.data;
+};

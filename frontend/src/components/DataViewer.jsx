@@ -1,6 +1,7 @@
-import React from 'react';
+import React, { useState } from 'react';
 
 const DataViewer = ({ data, title = 'Данные' }) => {
+  const [allServicesExpanded, setAllServicesExpanded] = useState(false);
   if (!data) {
     return (
       <div className="text-gray-500 text-center py-8">
@@ -42,6 +43,7 @@ const DataViewer = ({ data, title = 'Данные' }) => {
     additional_conditions: 'Дополнительные условия',
     technical_info: 'Техническая информация',
     services: 'Услуги по договору',
+    all_services: 'Все услуги по договору',
     // Поля для услуг
     unit: 'Единица измерения',
     quantity: 'Количество',
@@ -299,6 +301,81 @@ const DataViewer = ({ data, title = 'Данные' }) => {
     );
   };
 
+  const renderAllServicesTable = (services) => {
+    if (!Array.isArray(services) || services.length === 0) {
+      return <span className="text-gray-400">Услуги не найдены</span>;
+    }
+
+    return (
+      <div className="border border-gray-200 rounded-lg overflow-hidden">
+        <button
+          onClick={() => setAllServicesExpanded(!allServicesExpanded)}
+          className="w-full flex justify-between items-center p-4 bg-gray-50 hover:bg-gray-100 transition-colors"
+        >
+          <span className="font-medium text-gray-700">
+            Все услуги по договору ({services.length})
+          </span>
+          <svg
+            className={`w-5 h-5 text-gray-500 transition-transform ${allServicesExpanded ? 'rotate-180' : ''}`}
+            fill="none"
+            stroke="currentColor"
+            viewBox="0 0 24 24"
+          >
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+          </svg>
+        </button>
+
+        {allServicesExpanded && (
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead className="bg-gray-50 border-t border-gray-200">
+                <tr>
+                  <th className="px-4 py-3 text-left font-medium text-gray-600">№</th>
+                  <th className="px-4 py-3 text-left font-medium text-gray-600">Наименование</th>
+                  <th className="px-4 py-3 text-right font-medium text-gray-600">Кол-во</th>
+                  <th className="px-4 py-3 text-left font-medium text-gray-600">Ед. изм.</th>
+                  <th className="px-4 py-3 text-right font-medium text-gray-600">Цена за ед.</th>
+                  <th className="px-4 py-3 text-right font-medium text-gray-600">Сумма</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-200">
+                {services.map((service, index) => (
+                  <tr key={index} className="hover:bg-gray-50">
+                    <td className="px-4 py-3 text-gray-500">{index + 1}</td>
+                    <td className="px-4 py-3 text-gray-900">
+                      <div className="max-w-md">
+                        <div className="font-medium">{service.name}</div>
+                        {service.description && (
+                          <div className="text-xs text-gray-500 mt-1">{service.description}</div>
+                        )}
+                      </div>
+                    </td>
+                    <td className="px-4 py-3 text-right text-gray-900">
+                      {service.quantity ?? '—'}
+                    </td>
+                    <td className="px-4 py-3 text-gray-600">
+                      {service.unit ?? '—'}
+                    </td>
+                    <td className="px-4 py-3 text-right text-gray-900">
+                      {service.unit_price != null
+                        ? `${parseFloat(service.unit_price).toLocaleString('ru-RU', { minimumFractionDigits: 2 })} ₽`
+                        : '—'}
+                    </td>
+                    <td className="px-4 py-3 text-right font-medium text-gray-900">
+                      {service.total_price != null
+                        ? `${parseFloat(service.total_price).toLocaleString('ru-RU', { minimumFractionDigits: 2 })} ₽`
+                        : '—'}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    );
+  };
+
   const renderCounterparty = (counterparty, title) => {
     if (!counterparty || typeof counterparty !== 'object') {
       return null;
@@ -429,6 +506,25 @@ const DataViewer = ({ data, title = 'Данные' }) => {
             </span>
             <div className="text-gray-900">
               {renderLocations(value)}
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // Специальная обработка для all_services (все услуги по договору - сворачиваемая таблица)
+    if (key === 'all_services' && Array.isArray(value)) {
+      return (
+        <div
+          key={key}
+          className={`py-2 border-b border-gray-100 ${level > 0 ? 'ml-4' : ''}`}
+        >
+          <div className="flex flex-col">
+            <span className="font-medium text-gray-600 mb-2">
+              {translateField(key)}:
+            </span>
+            <div className="text-gray-900">
+              {renderAllServicesTable(value)}
             </div>
           </div>
         </div>

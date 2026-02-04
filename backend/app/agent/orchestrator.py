@@ -3,6 +3,7 @@
 """
 import asyncio
 import json
+import traceback
 from datetime import datetime
 from typing import Dict, Any, List
 
@@ -52,7 +53,10 @@ class AgentOrchestrator:
             
             # Шаг 3: Извлечь данные контракта с помощью LLM
             await self._extract_contract_data(state)
-            
+
+            # Шаг 3.5: Извлечь все услуги отдельным запросом
+            await self._extract_all_services(state)
+
             # Шаг 4: Валидировать извлеченные данные
             await self._validate_data(state)
             
@@ -67,10 +71,13 @@ class AgentOrchestrator:
             state.status = ProcessingState.COMPLETED
             
         except Exception as e:
+            error_traceback = traceback.format_exc()
             logger.error("Contract processing failed", 
                         contract_id=contract_id,
                         error=str(e),
-                        error_type=type(e).__name__)
+                        error_type=type(e).__name__,
+                        error_traceback=error_traceback,
+                        state_status=state.status.value if hasattr(state, 'status') else None)
             state.status = ProcessingState.FAILED
             state.error_message = str(e)
         
@@ -148,34 +155,7 @@ class AgentOrchestrator:
                 service_desc = service_desc[:500] + "..."
             context_parts.append(f"- {service_desc}")
             context_parts.append("")
-        
-        # Секция УСЛУГИ ИЗ СПЕЦИФИКАЦИИ
-        services = extracted_data.get('services')
-        if services and isinstance(services, list) and len(services) > 0:
-            context_parts.append("УСЛУГИ ИЗ СПЕЦИФИКАЦИИ:")
-            # Ограничиваем количество услуг для контекста (берем первые 10)
-            services_to_show = services[:10]
-            for idx, service in enumerate(services_to_show, start=1):
-                if isinstance(service, dict):
-                    service_info = []
-                    if service.get('name'):
-                        service_info.append(f"  {idx}. {service['name']}")
-                    if service.get('quantity') is not None:
-                        unit = service.get('unit', '')
-                        if unit:
-                            service_info.append(f"     Количество: {service['quantity']} {unit}")
-                        else:
-                            service_info.append(f"     Количество: {service['quantity']}")
-                    if service.get('unit_price') is not None:
-                        service_info.append(f"     Цена за единицу: {service['unit_price']}")
-                    if service.get('total_price') is not None:
-                        service_info.append(f"     Общая стоимость: {service['total_price']}")
-                    if service_info:
-                        context_parts.extend(service_info)
-            if len(services) > 10:
-                context_parts.append(f"  ... и еще {len(services) - 10} услуг")
-            context_parts.append("")
-        
+
         # Секция ДАТЫ ОКАЗАНИЯ УСЛУГ
         service_dates = []
         if extracted_data.get('service_start_date'):
@@ -418,470 +398,178 @@ class AgentOrchestrator:
                 request_info["response_size"] = len(str(response_data))
                 request_info["status"] = "success"
             except Exception as e:
+                error_traceback = traceback.format_exc()
                 request_info["status"] = "error"
                 request_info["error"] = str(e)
+                logger.error("Failed to extract contract data (single request)",
+                           contract_id=state.contract_id,
+                           error=str(e),
+                           error_type=type(e).__name__,
+                           error_traceback=error_traceback,
+                           document_size=document_size,
+                           prompt_size=len(full_prompt))
                 raise
             finally:
                 state.llm_requests.append(request_info)
         else:
-            # Документ большой, разбиваем на чанки и обрабатываем постепенно
-            logger.info("Large document detected, splitting into chunks",
+            # Документ большой, разбиваем на чанки и обрабатываем ПАРАЛЛЕЛЬНО
+            logger.info("Large document detected, splitting into chunks for PARALLEL processing",
                        contract_id=state.contract_id,
                        document_size=document_size)
-            
-            chunks = self.doc_processor.get_chunks_for_llm(max_tokens_per_chunk=8000)
+
+            chunks = self.doc_processor.get_chunks_for_llm()
             logger.info("Document split into chunks",
                        contract_id=state.contract_id,
                        chunks_count=len(chunks))
-            
-            # Обрабатываем каждый чанк через LLM
+
+            # Обрабатываем все чанки ПАРАЛЛЕЛЬНО через LLM
+            parallel_results = await self.llm_service.extract_contract_data_parallel(chunks)
+
+            # Собираем результаты
             chunks_data: List[Dict[str, Any]] = []
             chunks_with_context: List[Dict[str, Any]] = []
-            accumulated_data: Dict[str, Any] = {}  # Накопленные данные из предыдущих чанков
-            
-            for chunk_idx, chunk_text in enumerate(chunks, start=1):
-                logger.info("Processing chunk",
-                           contract_id=state.contract_id,
-                           chunk_index=chunk_idx,
-                           total_chunks=len(chunks),
-                           chunk_size=len(chunk_text))
-                
-                # Для чанков после первого добавляем контекст из предыдущих чанков
-                enriched_chunk_text = chunk_text
-                if chunk_idx > 1 and accumulated_data:
-                    context_block = self._build_chunk_context(accumulated_data)
-                    enriched_chunk_text = context_block + chunk_text
-                    logger.info("Added context to chunk",
-                               contract_id=state.contract_id,
-                               chunk_index=chunk_idx,
-                               context_size=len(context_block))
-                
-                # Сохраняем контекст чанка (первые 1000 символов для понимания содержимого)
-                chunk_context = enriched_chunk_text[:1000] if enriched_chunk_text else ""
-                
-                # Формируем полный промпт, который уходит в LLM
+            failed_chunks: List[tuple[int, str]] = []
+
+            for chunk_idx, chunk_data, error in parallel_results:
+                chunk_text = chunks[chunk_idx - 1] if chunk_idx <= len(chunks) else ""
+                chunk_context = chunk_text[:1000] if chunk_text else ""
+
+                # Формируем полный промпт для логирования
                 system_prompt = """You are an expert in Russian contract analysis.
         Extract contract information from documents and return it as valid JSON.
         Be precise with INN extraction (10 or 12 digits).
         Use boolean fields is_supplier and is_buyer for roles.
         """
-                user_prompt = EXTRACT_CONTRACT_DATA_PROMPT.format(document_text=enriched_chunk_text)
+                user_prompt = EXTRACT_CONTRACT_DATA_PROMPT.format(document_text=chunk_text)
                 full_prompt = f"SYSTEM:\n{system_prompt}\n\nUSER:\n{user_prompt}"
-                
-                # Сохраняем информацию о запросе для каждого чанка
+
                 request_info = {
-                    "request_type": "chunk",
+                    "request_type": "chunk_parallel",
                     "chunk_index": chunk_idx,
                     "total_chunks": len(chunks),
-                    "chunk_context": chunk_context,  # Сохраняем контекст чанка
+                    "chunk_context": chunk_context,
                     "request_text": full_prompt,
                     "request_size": len(full_prompt),
                     "request_tokens_estimate": self.doc_processor.estimate_tokens(full_prompt),
                     "timestamp": datetime.now().isoformat(),
                 }
-                
-                try:
-                    chunk_data = await self.llm_service.extract_contract_data(enriched_chunk_text)
+
+                if chunk_data:
                     chunks_data.append(chunk_data)
-                    
-                    # Обновляем накопленные данные информацией из текущего чанка
-                    # Приоритет отдается более полным данным
-                    if chunk_data:
-                        try:
-                            # Обновляем базовую информацию о контрагенте (если еще не было или если более полная)
-                            if not accumulated_data.get('inn') and chunk_data.get('inn'):
-                                accumulated_data['inn'] = chunk_data['inn']
-                            if not accumulated_data.get('full_name') and chunk_data.get('full_name'):
-                                accumulated_data['full_name'] = chunk_data['full_name']
-                            elif chunk_data.get('full_name') and len(chunk_data['full_name']) > len(accumulated_data.get('full_name', '')):
-                                accumulated_data['full_name'] = chunk_data['full_name']
-                            
-                            if not accumulated_data.get('short_name') and chunk_data.get('short_name'):
-                                accumulated_data['short_name'] = chunk_data['short_name']
-                            if not accumulated_data.get('organizational_form') and chunk_data.get('organizational_form'):
-                                accumulated_data['organizational_form'] = chunk_data['organizational_form']
-                            if not accumulated_data.get('kpp') and chunk_data.get('kpp'):
-                                accumulated_data['kpp'] = chunk_data['kpp']
-                            
-                            # Обновляем роли (объединяем)
-                            if chunk_data.get('is_supplier'):
-                                accumulated_data['is_supplier'] = True
-                            if chunk_data.get('is_buyer'):
-                                accumulated_data['is_buyer'] = True
-                            
-                            # Объединяем ответственных лиц (добавляем уникальных)
-                            existing_persons = accumulated_data.get('responsible_persons', [])
-                            if not isinstance(existing_persons, list):
-                                existing_persons = []
-                            
-                            new_persons = chunk_data.get('responsible_persons', [])
-                            if isinstance(new_persons, list):
-                                # Безопасное создание set имен - проверяем что name это строка
-                                existing_names = set()
-                                for p in existing_persons:
-                                    if isinstance(p, dict):
-                                        name = p.get('name')
-                                        if isinstance(name, str):
-                                            existing_names.add(name.lower())
-                                        elif isinstance(name, (list, tuple)):
-                                            # Если name это список, преобразуем в строку
-                                            name_str = ', '.join(str(n) for n in name if n)
-                                            if name_str:
-                                                existing_names.add(name_str.lower())
-                                
-                                for person in new_persons:
-                                    if isinstance(person, dict):
-                                        person_name = person.get('name')
-                                        if person_name:
-                                            # Преобразуем name в строку если это список
-                                            if isinstance(person_name, str):
-                                                name_key = person_name.lower()
-                                            elif isinstance(person_name, (list, tuple)):
-                                                name_key = ', '.join(str(n) for n in person_name if n).lower()
-                                            else:
-                                                name_key = str(person_name).lower()
-                                            
-                                            if name_key and name_key not in existing_names:
-                                                # Если name был списком, преобразуем в строку
-                                                if isinstance(person_name, (list, tuple)):
-                                                    person_copy = person.copy()
-                                                    person_copy['name'] = ', '.join(str(n) for n in person_name if n)
-                                                    existing_persons.append(person_copy)
-                                                else:
-                                                    existing_persons.append(person)
-                                                existing_names.add(name_key)
-                                        else:
-                                            # Обновляем существующего, если новая информация более полная
-                                            for idx, existing_person in enumerate(existing_persons):
-                                                if isinstance(existing_person, dict):
-                                                    existing_name = existing_person.get('name', '')
-                                                    if isinstance(existing_name, str):
-                                                        existing_name_key = existing_name.lower()
-                                                    elif isinstance(existing_name, (list, tuple)):
-                                                        existing_name_key = ', '.join(str(n) for n in existing_name if n).lower()
-                                                    else:
-                                                        existing_name_key = str(existing_name).lower()
-                                                    
-                                                    if existing_name_key == name_key:
-                                                        # Объединяем контакты
-                                                        if person.get('phone') and not existing_person.get('phone'):
-                                                            existing_persons[idx]['phone'] = person['phone']
-                                                        if person.get('email') and not existing_person.get('email'):
-                                                            existing_persons[idx]['email'] = person['email']
-                                                        if person.get('position') and not existing_person.get('position'):
-                                                            existing_persons[idx]['position'] = person['position']
-                                                        break
-                            
-                            accumulated_data['responsible_persons'] = existing_persons
-                            
-                            # Объединяем адреса (добавляем уникальные)
-                            existing_locations = accumulated_data.get('locations', []) or accumulated_data.get('service_locations', [])
-                            if not isinstance(existing_locations, list):
-                                existing_locations = []
-                            
-                            new_locations = chunk_data.get('locations', []) or chunk_data.get('service_locations', [])
-                            if isinstance(new_locations, list):
-                                # Безопасное создание set адресов - проверяем что address это строка
-                                existing_addresses = set()
-                                for loc in existing_locations:
-                                    if isinstance(loc, dict):
-                                        addr = loc.get('address')
-                                        if isinstance(addr, str):
-                                            existing_addresses.add(addr.lower())
-                                
-                                for location in new_locations:
-                                    if isinstance(location, dict):
-                                        addr = location.get('address')
-                                        if isinstance(addr, str):
-                                            addr_key = addr.lower()
-                                            if addr_key and addr_key not in existing_addresses:
-                                                existing_locations.append(location)
-                                                existing_addresses.add(addr_key)
-                                    elif isinstance(addr, (list, tuple)):
-                                        # Если address это список, преобразуем в строку
-                                        addr_str = ', '.join(str(a) for a in addr if a)
-                                        if addr_str:
-                                            addr_key = addr_str.lower()
-                                            if addr_key not in existing_addresses:
-                                                location_copy = location.copy()
-                                                location_copy['address'] = addr_str
-                                                existing_locations.append(location_copy)
-                                                existing_addresses.add(addr_key)
-                            
-                            accumulated_data['locations'] = existing_locations
-                            accumulated_data['service_locations'] = existing_locations
-                            
-                            # Объединяем услуги (добавляем уникальные)
-                            existing_services = accumulated_data.get('services', [])
-                            if not isinstance(existing_services, list):
-                                existing_services = []
-                            
-                            new_services = chunk_data.get('services', [])
-                            if isinstance(new_services, list):
-                                # Безопасное создание set названий услуг - проверяем что name это строка
-                                existing_service_names = set()
-                                for s in existing_services:
-                                    if isinstance(s, dict):
-                                        name = s.get('name')
-                                        if isinstance(name, str):
-                                            existing_service_names.add(name.lower())
-                                
-                                for service in new_services:
-                                    if isinstance(service, dict):
-                                        service_name = service.get('name')
-                                        if service_name:
-                                            # Преобразуем name в строку если это список
-                                            if isinstance(service_name, str):
-                                                name_key = service_name.lower()
-                                            else:
-                                                name_key = str(service_name).lower()
-                                            
-                                            if name_key and name_key not in existing_service_names:
-                                                existing_services.append(service)
-                                                existing_service_names.add(name_key)
-                            
-                            accumulated_data['services'] = existing_services
-                            
-                            # Обновляем информацию о заказчике и исполнителе
-                            if chunk_data.get('customer'):
-                                customer_data = chunk_data['customer']
-                                if isinstance(customer_data, dict):
-                                    # Если уже есть customer, обновляем только если новый более полный
-                                    if not accumulated_data.get('customer') or isinstance(accumulated_data.get('customer'), dict):
-                                        if not accumulated_data.get('customer'):
-                                            # Нормализуем данные customer перед сохранением
-                                            normalized_customer = {}
-                                            for key, value in customer_data.items():
-                                                if isinstance(value, (list, tuple)):
-                                                    # Преобразуем списки в строки для основных полей
-                                                    if key in ['inn', 'kpp', 'full_name', 'short_name', 'organizational_form', 'legal_entity_type']:
-                                                        normalized_customer[key] = ', '.join(str(v) for v in value if v) if value else None
-                                                    else:
-                                                        normalized_customer[key] = value
-                                                else:
-                                                    normalized_customer[key] = value
-                                            accumulated_data['customer'] = normalized_customer
-                                    else:
-                                        # Объединяем данные, приоритет более полным
-                                        existing_customer = accumulated_data['customer']
-                                        for key, value in customer_data.items():
-                                            if value:
-                                                # Нормализуем значение если это список
-                                                if isinstance(value, (list, tuple)) and key in ['inn', 'kpp', 'full_name', 'short_name', 'organizational_form', 'legal_entity_type']:
-                                                    value = ', '.join(str(v) for v in value if v) if value else None
-                                                
-                                                if value and (not existing_customer.get(key) or len(str(value)) > len(str(existing_customer.get(key, '')))):
-                                                    existing_customer[key] = value
-                            
-                            if chunk_data.get('contractor'):
-                                contractor_data = chunk_data['contractor']
-                                if isinstance(contractor_data, dict):
-                                    # Если уже есть contractor, обновляем только если новый более полный
-                                    if not accumulated_data.get('contractor') or isinstance(accumulated_data.get('contractor'), dict):
-                                        if not accumulated_data.get('contractor'):
-                                            # Нормализуем данные contractor перед сохранением
-                                            normalized_contractor = {}
-                                            for key, value in contractor_data.items():
-                                                if isinstance(value, (list, tuple)):
-                                                    # Преобразуем списки в строки для основных полей
-                                                    if key in ['inn', 'kpp', 'full_name', 'short_name', 'organizational_form', 'legal_entity_type']:
-                                                        normalized_contractor[key] = ', '.join(str(v) for v in value if v) if value else None
-                                                    else:
-                                                        normalized_contractor[key] = value
-                                                else:
-                                                    normalized_contractor[key] = value
-                                            accumulated_data['contractor'] = normalized_contractor
-                                    else:
-                                        # Объединяем данные, приоритет более полным
-                                        existing_contractor = accumulated_data['contractor']
-                                        for key, value in contractor_data.items():
-                                            if value:
-                                                # Нормализуем значение если это список
-                                                if isinstance(value, (list, tuple)) and key in ['inn', 'kpp', 'full_name', 'short_name', 'organizational_form', 'legal_entity_type']:
-                                                    value = ', '.join(str(v) for v in value if v) if value else None
-                                                
-                                                if value and (not existing_contractor.get(key) or len(str(value)) > len(str(existing_contractor.get(key, '')))):
-                                                    existing_contractor[key] = value
-                            
-                            # Обновляем основную информацию о договоре
-                            # Название договора - приоритет первому найденному или более полному
-                            if chunk_data.get('contract_name'):
-                                if not accumulated_data.get('contract_name'):
-                                    accumulated_data['contract_name'] = chunk_data['contract_name']
-                                elif len(str(chunk_data['contract_name'])) > len(str(accumulated_data.get('contract_name', ''))):
-                                    accumulated_data['contract_name'] = chunk_data['contract_name']
-                            
-                            # Номер договора - приоритет первому найденному
-                            if chunk_data.get('contract_number') and not accumulated_data.get('contract_number'):
-                                accumulated_data['contract_number'] = chunk_data['contract_number']
-                            
-                            # Дата договора - приоритет первой (обычно самая ранняя)
-                            if chunk_data.get('contract_date') and not accumulated_data.get('contract_date'):
-                                accumulated_data['contract_date'] = chunk_data['contract_date']
-                            
-                            # Цена договора - приоритет первому найденному или более высокой (если указана)
-                            if chunk_data.get('contract_price'):
-                                if not accumulated_data.get('contract_price'):
-                                    accumulated_data['contract_price'] = chunk_data['contract_price']
-                                # Можно также сравнивать числовые значения, но пока берем первое
-                            
-                            # НДС - приоритет первому найденному
-                            if chunk_data.get('vat_type') and not accumulated_data.get('vat_type'):
-                                accumulated_data['vat_type'] = chunk_data['vat_type']
-                            if chunk_data.get('vat_percent') and not accumulated_data.get('vat_percent'):
-                                accumulated_data['vat_percent'] = chunk_data['vat_percent']
-                            
-                            # Описание услуг/товаров - объединяем или выбираем более полное
-                            if chunk_data.get('service_description'):
-                                if not accumulated_data.get('service_description'):
-                                    accumulated_data['service_description'] = chunk_data['service_description']
-                                elif isinstance(chunk_data['service_description'], str) and isinstance(accumulated_data.get('service_description'), str):
-                                    # Выбираем более полное описание
-                                    if len(chunk_data['service_description']) > len(accumulated_data['service_description']):
-                                        accumulated_data['service_description'] = chunk_data['service_description']
-                            
-                            # Даты оказания услуг - приоритет первому найденному
-                            if chunk_data.get('service_start_date') and not accumulated_data.get('service_start_date'):
-                                accumulated_data['service_start_date'] = chunk_data['service_start_date']
-                            if chunk_data.get('service_end_date') and not accumulated_data.get('service_end_date'):
-                                accumulated_data['service_end_date'] = chunk_data['service_end_date']
-                            
-                            # Условия оплаты - объединяем или выбираем более полное
-                            if chunk_data.get('payment_terms'):
-                                if not accumulated_data.get('payment_terms'):
-                                    accumulated_data['payment_terms'] = chunk_data['payment_terms']
-                                elif isinstance(chunk_data['payment_terms'], str) and isinstance(accumulated_data.get('payment_terms'), str):
-                                    if len(chunk_data['payment_terms']) > len(accumulated_data['payment_terms']):
-                                        accumulated_data['payment_terms'] = chunk_data['payment_terms']
-                            
-                            # Порядок приема-сдачи - выбираем более полное
-                            if chunk_data.get('acceptance_procedure'):
-                                if not accumulated_data.get('acceptance_procedure'):
-                                    accumulated_data['acceptance_procedure'] = chunk_data['acceptance_procedure']
-                                elif isinstance(chunk_data['acceptance_procedure'], str) and isinstance(accumulated_data.get('acceptance_procedure'), str):
-                                    if len(chunk_data['acceptance_procedure']) > len(accumulated_data['acceptance_procedure']):
-                                        accumulated_data['acceptance_procedure'] = chunk_data['acceptance_procedure']
-                            
-                            # Наличие спецификации - приоритет true если хотя бы в одном чанке true
-                            if chunk_data.get('specification_exists') is not None:
-                                if accumulated_data.get('specification_exists') is None:
-                                    accumulated_data['specification_exists'] = chunk_data['specification_exists']
-                                elif not accumulated_data.get('specification_exists') and chunk_data.get('specification_exists'):
-                                    accumulated_data['specification_exists'] = True
-                            
-                            # Порядок ценообразования - выбираем более полное
-                            if chunk_data.get('pricing_method'):
-                                if not accumulated_data.get('pricing_method'):
-                                    accumulated_data['pricing_method'] = chunk_data['pricing_method']
-                                elif isinstance(chunk_data['pricing_method'], str) and isinstance(accumulated_data.get('pricing_method'), str):
-                                    if len(chunk_data['pricing_method']) > len(accumulated_data['pricing_method']):
-                                        accumulated_data['pricing_method'] = chunk_data['pricing_method']
-                            
-                            # Формы отчетности - выбираем более полное
-                            if chunk_data.get('reporting_forms'):
-                                if not accumulated_data.get('reporting_forms'):
-                                    accumulated_data['reporting_forms'] = chunk_data['reporting_forms']
-                                elif isinstance(chunk_data['reporting_forms'], str) and isinstance(accumulated_data.get('reporting_forms'), str):
-                                    if len(chunk_data['reporting_forms']) > len(accumulated_data['reporting_forms']):
-                                        accumulated_data['reporting_forms'] = chunk_data['reporting_forms']
-                            
-                            # Дополнительные условия - выбираем более полное
-                            if chunk_data.get('additional_conditions'):
-                                if not accumulated_data.get('additional_conditions'):
-                                    accumulated_data['additional_conditions'] = chunk_data['additional_conditions']
-                                elif isinstance(chunk_data['additional_conditions'], str) and isinstance(accumulated_data.get('additional_conditions'), str):
-                                    if len(chunk_data['additional_conditions']) > len(accumulated_data['additional_conditions']):
-                                        accumulated_data['additional_conditions'] = chunk_data['additional_conditions']
-                            
-                            # Техническая информация - выбираем более полное
-                            if chunk_data.get('technical_information'):
-                                if not accumulated_data.get('technical_information'):
-                                    accumulated_data['technical_information'] = chunk_data['technical_information']
-                                elif isinstance(chunk_data['technical_information'], str) and isinstance(accumulated_data.get('technical_information'), str):
-                                    if len(chunk_data['technical_information']) > len(accumulated_data['technical_information']):
-                                        accumulated_data['technical_information'] = chunk_data['technical_information']
-                        except Exception as data_update_error:
-                            logger.error("Failed to update accumulated data",
-                                        contract_id=state.contract_id,
-                                        chunk_index=chunk_idx,
-                                        error=str(data_update_error),
-                                        error_type=type(data_update_error).__name__,
-                                        chunk_data_keys=list(chunk_data.keys()) if chunk_data else None)
-                            # Продолжаем обработку даже если обновление накопленных данных не удалось
-                    
-                    # Формируем полный накопленный контекст для этого чанка
-                    accumulated_context = self._build_chunk_context(accumulated_data) if accumulated_data else ""
-                    
-                    # Сохраняем данные для финальной агрегации с контекстом
                     chunks_with_context.append({
                         "chunk_index": chunk_idx,
-                        "chunk_context": chunk_context,  # Первые 1000 символов текста чанка для понимания содержимого
-                        "accumulated_context": accumulated_context,  # Полный накопленный контекст из предыдущих чанков
+                        "chunk_context": chunk_context,
+                        "accumulated_context": "",  # При параллельной обработке контекст не накапливается
                         "extracted_data": chunk_data
                     })
-                    
-                    # Сохраняем информацию об ответе
                     request_info["response_data"] = chunk_data
                     request_info["response_size"] = len(str(chunk_data))
                     request_info["status"] = "success"
-                    
-                    logger.info("Chunk processed successfully",
+                    logger.info("Chunk processed successfully (parallel)",
                                contract_id=state.contract_id,
                                chunk_index=chunk_idx)
-                except Exception as e:
+                else:
                     request_info["status"] = "error"
-                    request_info["error"] = str(e)
+                    request_info["error"] = error or "Unknown error"
+                    failed_chunks.append((chunk_idx, error or "Unknown error"))
                     
-                    logger.error("Failed to process chunk",
+                    # Детальное логирование ошибки чанка
+                    chunk_size = len(chunk_text) if chunk_text else 0
+                    logger.error("Failed to process chunk (parallel)",
                                contract_id=state.contract_id,
                                chunk_index=chunk_idx,
-                               error=str(e))
-                    # Продолжаем обработку остальных чанков даже если один упал
-                finally:
-                    state.llm_requests.append(request_info)
-            
+                               total_chunks=len(chunks),
+                               error=error,
+                               error_type=type(error).__name__ if error else "Unknown",
+                               chunk_size=chunk_size,
+                               chunk_preview=chunk_text[:300] if chunk_text else None,
+                               chunk_context_preview=chunk_context[:200] if chunk_context else None)
+
+                state.llm_requests.append(request_info)
+
+            # Проверяем результаты обработки
             if not chunks_data:
-                raise Exception("Failed to extract data from any chunk")
+                failed_chunk_details = [
+                    {"chunk_index": idx, "error": err} 
+                    for idx, err in failed_chunks
+                ]
+                error_traceback = traceback.format_exc()
+                logger.error("Failed to extract data from any chunk",
+                           contract_id=state.contract_id,
+                           total_chunks=len(chunks),
+                           failed_chunks_count=len(failed_chunks),
+                           failed_chunk_details=failed_chunk_details,
+                           error_traceback=error_traceback)
+                raise Exception(f"Failed to extract data from any chunk. Total chunks: {len(chunks)}, Failed chunks: {len(failed_chunks)}")
             
-            # Формируем финальный накопленный контекст из всех чанков
-            final_accumulated_context = self._build_chunk_context(accumulated_data) if accumulated_data else ""
+            # Логируем статистику обработки
+            successful_count = len(chunks_data)
+            failed_count = len(failed_chunks)
+            success_rate = (successful_count / len(chunks)) * 100
             
-            # Обновляем последний чанк с финальным накопленным контекстом
-            if chunks_with_context and final_accumulated_context:
-                chunks_with_context[-1]['accumulated_context'] = final_accumulated_context
+            logger.info("Parallel chunk processing completed",
+                       contract_id=state.contract_id,
+                       successful_chunks=successful_count,
+                       failed_chunks=failed_count,
+                       total_chunks=len(chunks),
+                       success_rate=f"{success_rate:.1f}%")
             
+            # Предупреждаем, если упало слишком много чанков
+            if failed_count > 0:
+                failed_chunk_indices = [idx for idx, _ in failed_chunks]
+                failed_chunk_errors = [err for _, err in failed_chunks]
+                
+                logger.warning("Some chunks failed to process, continuing with successful chunks",
+                             contract_id=state.contract_id,
+                             failed_chunk_indices=failed_chunk_indices,
+                             failed_chunk_errors=failed_chunk_errors,
+                             failed_count=failed_count,
+                             successful_count=successful_count,
+                             success_rate=f"{success_rate:.1f}%")
+                
+                # Если упало больше половины чанков, это критично
+                if failed_count > len(chunks) / 2:
+                    logger.error("More than half of chunks failed to process",
+                               contract_id=state.contract_id,
+                               failed_count=failed_count,
+                               total_chunks=len(chunks),
+                               failed_chunk_indices=failed_chunk_indices,
+                               failed_chunk_errors=failed_chunk_errors,
+                               success_rate=f"{success_rate:.1f}%",
+                               critical=True)
+
             # Агрегируем результаты из всех чанков через LLM с разрешением конфликтов
             logger.info("Aggregating data from chunks via LLM",
                        contract_id=state.contract_id,
                        chunks_processed=len(chunks_with_context))
             
-            # Формируем данные для промпта агрегации с полным накопленным контекстом (для логирования)
+            # Формируем данные для промпта агрегации (для логирования)
             chunks_data_formatted = []
             for chunk_info in chunks_with_context:
-                chunk_data = {
+                chunk_data_item = {
                     "chunk_index": chunk_info.get('chunk_index', 0),
-                    "chunk_context": chunk_info.get('chunk_context', '')[:1000],  # Первые 1000 символов текста чанка
-                    "accumulated_context": chunk_info.get('accumulated_context', ''),  # Полный накопленный контекст
+                    "chunk_context": chunk_info.get('chunk_context', '')[:1000],
+                    "accumulated_context": "",  # При параллельной обработке контекст не накапливается
                     "extracted_data": chunk_info.get('extracted_data', {})
                 }
-                chunks_data_formatted.append(chunk_data)
-            
+                chunks_data_formatted.append(chunk_data_item)
+
             # Формируем промпт для агрегации
             chunks_json = json.dumps(chunks_data_formatted, ensure_ascii=False, indent=2)
             user_prompt = MERGE_CHUNKS_DATA_PROMPT.format(
                 total_chunks=len(chunks_with_context),
                 chunks_data=chunks_json,
-                accumulated_context=final_accumulated_context
+                accumulated_context="Параллельная обработка чанков - накопленный контекст отсутствует."
             )
             system_prompt = """You are an expert in Russian contract analysis.
         Merge contract information from multiple document chunks and resolve conflicts.
         Return only valid JSON with all merged fields.
         """
             full_prompt = f"SYSTEM:\n{system_prompt}\n\nUSER:\n{user_prompt}"
-            
+
             # Сохраняем информацию о финальном запросе агрегации
             aggregation_request_info = {
-                "request_type": "aggregation",
+                "request_type": "aggregation_parallel",
                 "chunk_index": None,
                 "total_chunks": len(chunks_with_context),
                 "request_text": full_prompt,
@@ -902,12 +590,17 @@ class AgentOrchestrator:
                            contract_id=state.contract_id,
                            chunks_count=len(chunks_with_context))
             except Exception as e:
+                error_traceback = traceback.format_exc()
                 aggregation_request_info["status"] = "error"
                 aggregation_request_info["error"] = str(e)
                 
                 logger.error("Failed to aggregate chunks data via LLM, using fallback",
                            contract_id=state.contract_id,
-                           error=str(e))
+                           error=str(e),
+                           error_type=type(e).__name__,
+                           error_traceback=error_traceback,
+                           chunks_count=len(chunks_with_context),
+                           prompt_size=len(full_prompt))
                 
                 # Fallback на простое объединение если LLM агрегация не удалась
                 state.extracted_data = self.llm_service.merge_extracted_data(chunks_data)
@@ -951,7 +644,60 @@ class AgentOrchestrator:
             extracted_data=state.extracted_data,
             llm_requests=state.llm_requests
         )
-    
+
+    async def _extract_all_services(self, state: AgentState):
+        """Извлечь все услуги отдельным запросом к LLM (ПАРАЛЛЕЛЬНО)"""
+        logger.info("Extracting all services separately (parallel)", contract_id=state.contract_id)
+
+        # Инициализируем список запросов LLM если его еще нет
+        if state.llm_requests is None:
+            state.llm_requests = []
+
+        # Получаем чанки (используем те же что и для основного извлечения)
+        if not state.raw_text:
+            state.raw_text = self.doc_processor.extract_text()
+
+        max_single_request_size = 64000
+        document_size = len(state.raw_text)
+
+        if document_size <= max_single_request_size:
+            chunks = [state.raw_text]
+        else:
+            chunks = self.doc_processor.get_chunks_for_llm()
+
+        # Информация о запросе для логирования
+        request_info = {
+            "request_type": "services_extraction_parallel",
+            "chunks_count": len(chunks),
+            "timestamp": datetime.now().isoformat(),
+        }
+
+        all_services = []
+        try:
+            # Извлекаем услуги параллельно из всех чанков
+            all_services = await self.llm_service.extract_services_from_chunks(chunks)
+            state.extracted_data['all_services'] = all_services
+
+            request_info["status"] = "success"
+            request_info["services_count"] = len(all_services)
+
+            logger.info("Services extracted successfully (parallel)",
+                       contract_id=state.contract_id,
+                       services_count=len(all_services),
+                       chunks_count=len(chunks))
+        except Exception as e:
+            error_traceback = traceback.format_exc()
+            request_info["status"] = "error"
+            request_info["error"] = str(e)
+            logger.error("Failed to extract services",
+                       contract_id=state.contract_id,
+                       error=str(e),
+                       error_type=type(e).__name__,
+                       error_traceback=error_traceback,
+                       chunks_count=len(chunks) if 'chunks' in locals() else 0)
+            state.extracted_data['all_services'] = []
+        finally:
+            state.llm_requests.append(request_info)
     async def _validate_data(self, state: AgentState):
         """Валидировать извлеченные данные"""
         logger.info("Validating extracted data", contract_id=state.contract_id)
@@ -1025,10 +771,13 @@ class AgentOrchestrator:
                     search_error = existing.get('_error')
                     existing = None  # Очищаем результат, если есть ошибка
             except Exception as e:
+                error_traceback = traceback.format_exc()
                 logger.error("Exception during counterparty search", 
                            contract_id=state.contract_id,
                            inn=inn,
-                           error=str(e))
+                           error=str(e),
+                           error_type=type(e).__name__,
+                           error_traceback=error_traceback)
                 search_error = str(e)
             
             # Сохраняем информацию о поиске в ProcessingHistory
@@ -1147,10 +896,15 @@ class AgentOrchestrator:
                     raw_text=state.raw_text
                 )
             except Exception as e:
+                error_traceback = traceback.format_exc()
                 create_error = str(e)
                 logger.error("Failed to create counterparty in 1C",
                            contract_id=state.contract_id,
-                           error=create_error)
+                           error=create_error,
+                           error_type=type(e).__name__,
+                           error_traceback=error_traceback,
+                           inn=inn,
+                           counterparty_data_keys=list(counterparty_data.keys()) if 'counterparty_data' in locals() else None)
             
             # Извлекаем UUID и данные из результата
             created_id = None

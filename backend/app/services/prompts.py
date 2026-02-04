@@ -42,42 +42,25 @@ ADDITIONAL FIELDS (fill if present):
 14. Service Locations (Адреса оказания услуг) - list of addresses with fields: address, city, region, postal_code
 15. Service Period Start (Начало периода услуг) - format: YYYY-MM-DD
 16. Service Period End (Окончание периода услуг) - format: YYYY-MM-DD
-17. Services (Услуги из спецификации/таблиц) - CRITICAL: Extract ALL services from specification tables or service lists:
-    - Extract services from tables marked as "Спецификация", "Перечень услуг", "Таблица услуг", "Предмет договора", "Состав услуг", or similar
-    - Extract services from text sections that describe individual services, even if they are not in table format
-    - Each service should be an object with fields:
-      * name (Название услуги) - REQUIRED, must be a STRING. Extract the full name of the service
-      * quantity (Количество) - numeric value if present in table or text. Look for numbers near service name
-      * unit (Единица измерения) - e.g., "шт", "час", "день", "мес", "кв.м", "компл", "услуга" if present. Extract from table columns or text
-      * unit_price (Цена за единицу) - numeric value if present. Look for "цена", "цена за единицу", "стоимость единицы"
-      * total_price (Общая стоимость) - numeric value if present. Look for "сумма", "стоимость", "итого", "общая стоимость"
-      * description (Описание услуги) - CRITICAL: Extract detailed description of what the service includes. Look for text after service name, in separate columns, or in paragraphs describing the service. Include all details about what is included in the service
-    - Look for tables with columns like: "Наименование", "Наименование услуги", "Количество", "Ед. изм.", "Единица измерения", "Цена", "Цена за единицу", "Сумма", "Стоимость", "Описание"
-    - Extract ALL rows from specification tables, not just summary or totals
-    - If services are listed in text format (numbered lists, bullet points, paragraphs), extract each as a separate service item
-    - If a service has a detailed description in the document (even if not in a table), extract it with full description
-    - IMPORTANT: Return services as an array of objects, even if only one service is found
-    - IMPORTANT: If quantity, unit, unit_price, or total_price are not found in the document, set them to null (not empty string, not 0)
-    - CRITICAL: Always extract description field if there is any text describing what the service includes, even if it's in a separate section or paragraph
-18. Responsible Persons (Ответственные лица и агенты) - CRITICAL: Extract ALL responsible persons with FULL contact information:
+17. Responsible Persons (Ответственные лица и агенты) - CRITICAL: Extract ALL responsible persons with FULL contact information:
     - name (ФИО) - REQUIRED for each person, must be a STRING
     - position (Должность) - extract if present, must be a STRING
     - phone (Телефон) - extract ALL phone numbers found (mobile, office, fax), combine into SINGLE STRING separated by commas if multiple
     - email (Email) - extract ALL email addresses found, combine into SINGLE STRING separated by commas if multiple
     - IMPORTANT: phone and email must be STRINGS, not arrays. If multiple values exist, join them with ", " (comma and space)
     - Look for: "Ответственное лицо", "Контактное лицо", "Представитель", "Агент", "Руководитель", "Директор"
-19. Contact Information (Контактная информация контрагентов):
+18. Contact Information (Контактная информация контрагентов):
     - Extract ALL phone numbers mentioned in the document (office, mobile, fax)
     - Extract ALL email addresses mentioned in the document
     - Extract postal addresses, legal addresses, and service addresses
     - Look in sections: "Реквизиты", "Контактная информация", "Адреса и телефоны"
-20. Payment Terms (Условия оплаты)
-21. Acceptance Procedure (Порядок приема-сдачи)
-22. Specification Exists (Наличие спецификации) - true/false
-23. Pricing Method (Порядок ценообразования)
-24. Reporting Forms (Формы отчетности)
-25. Additional Conditions (Дополнительные условия)
-26. Technical Information (Техническая информация)
+19. Payment Terms (Условия оплаты)
+20. Acceptance Procedure (Порядок приема-сдачи)
+21. Specification Exists (Наличие спецификации) - true/false
+22. Pricing Method (Порядок ценообразования)
+23. Reporting Forms (Формы отчетности)
+24. Additional Conditions (Дополнительные условия)
+25. Technical Information (Техническая информация)
 
 CONTRACT DOCUMENT:
 {document_text}
@@ -115,25 +98,6 @@ IMPORTANT INSTRUCTIONS:
 - Ensure all JSON is valid
 - Return ONLY valid JSON, no additional text
 - Structure counterparties as objects with fields: inn, kpp, full_name, short_name, organizational_form, legal_entity_type
-
-CRITICAL: SERVICES EXTRACTION:
-- Extract ALL services mentioned in the document, even if they appear in different sections or formats
-- Look for services in:
-  * Specification tables (marked as "Спецификация", "Перечень услуг", "Таблица", etc.)
-  * Text sections describing services (numbered lists, bullet points, paragraphs)
-  * Sections titled "Предмет договора", "Состав услуг", "Перечень работ", "Виды услуг"
-  * Appendices and attachments that may contain service lists
-- For each service found, extract ALL available information:
-  * Name - REQUIRED, extract the full name even if it's long
-  * Description - CRITICAL: Extract detailed description of what the service includes. Look for:
-    - Text immediately following the service name
-    - Separate description columns in tables
-    - Paragraphs or bullet points describing the service
-    - Any text that explains what is included in the service
-  * Quantity, unit, prices - extract if available in tables or text
-- If services are described in paragraphs (not tables), extract each distinct service as a separate item
-- Do NOT skip services even if they appear in appendices, attachments, or separate sections
-- IMPORTANT: If a service has a detailed description in the document, always include it in the description field
 
 CRITICAL: CONTACT INFORMATION EXTRACTION:
 - Extract ALL responsible persons (agents) mentioned in the document, even if they appear in different sections
@@ -240,23 +204,15 @@ INSTRUCTIONS FOR MERGING:
    - If only one role appears, set that one to true
    - These fields are for backward compatibility, prefer using customer/contractor fields
 
-7. **List Fields (locations, responsible_persons, services):**
+7. **List Fields (locations, responsible_persons):**
    - Merge all unique items from all chunks
    - Remove duplicates based on:
      * locations: compare by address field
      * responsible_persons: compare by name field
-     * services: compare by name field (exact match or very similar names - use fuzzy matching for slight variations)
    - Combine information: if same person appears in multiple chunks with different contact info, merge the contact details
    - IMPORTANT: For responsible_persons, ensure phone and email are STRINGS (not arrays). If multiple values exist, join with ", "
-   - For services: merge all services from all chunks, removing duplicates by name (use fuzzy matching - services with similar names should be considered the same). If same service appears in multiple chunks:
-     * Prefer the version with more complete information (more non-null fields)
-     * If one chunk has quantity/price and another doesn't, use the one with quantity/price
-     * If one chunk has description and another doesn't, use the one with description
-     * If descriptions differ, combine them or use the longer/more detailed one
-     * If quantities/prices differ and they seem to represent different instances (e.g., different line items in a table), keep them as separate services
-     * CRITICAL: Always preserve description field - it's very important for understanding what the service includes
 
-7. **Additional Fields:**
+8. **Additional Fields:
    - service_description: combine text from all chunks, removing duplicates
    - service_start_date, service_end_date: use dates from the main contract section
    - payment_terms, acceptance_procedure: prefer more detailed descriptions
@@ -268,7 +224,7 @@ INSTRUCTIONS FOR MERGING:
    - The ACCUMULATED CONTEXT section contains verified information from all previous chunks
    - Use accumulated context as the primary reference for core contract information (contract_name, contract_number, contract_date, contract_price, vat_type, vat_percent)
    - Use accumulated context for counterparty information (customer, contractor) - it contains the most complete data
-   - Use accumulated context for responsible_persons, locations, and services - it already contains merged unique values
+   - Use accumulated context for responsible_persons and locations - it already contains merged unique values
    - If a field exists in accumulated context, prefer it over individual chunk data unless chunk data is more complete
    - Accumulated context represents the "best known" state at each point, use it to resolve conflicts
 
@@ -288,4 +244,51 @@ INSTRUCTIONS FOR MERGING:
    - Remember: Missing data (null) is better than invented data
 
 Return a valid JSON object with all merged fields. The result should be complete, consistent, and represent the most accurate information from all chunks combined.
+"""
+
+EXTRACT_SERVICES_ONLY_PROMPT = """You are an expert at extracting service and product information from Russian contracts and specifications.
+
+Your task is to extract EVERY SINGLE service/product line from tables in the document. Each row in a table = one service entry.
+
+CRITICAL: Extract ALL rows from tables, not just summaries. If there are 100 services in a table, return all 100.
+
+SEARCH FOR TABLES WITH:
+1. Headers: "Наименование", "Наименование услуги/товара", "Ед. изм.", "Цена", "Стоимость", "Сумма"
+2. Sections: "Спецификация", "Перечень услуг", "Перечень работ", "Приложение"
+3. Service patterns: "Услуги по...", "Услуги по замене включая запчасть:", "Услуги по заправке", "Услуги по техническому обслуживанию"
+
+PRICE FORMAT RULES:
+- Russian prices use SPACE as thousands separator and COMMA as decimal: "7 702,40" means 7702.40
+- Convert to number: "26 360,80" → 26360.80, "1 079,00" → 1079.00
+- If price column exists, it's usually total_price (not unit_price)
+
+FOR EACH TABLE ROW EXTRACT:
+- name (string, REQUIRED) - Full service name exactly as written, including part numbers and model names
+  Examples:
+  - "Услуги по замене включая запчасть: CE285A- Оригинальный картридж Для HP LaserJet P1102"
+  - "Услуги по техническому обслуживанию принтера FS-1060DN"
+  - "Услуги по заправке картриджа принтера LBP-2900"
+- quantity (number or null) - If quantity column exists
+- unit (string or null) - Unit of measurement: "усл.ед.", "шт", "час", "день", "мес", "компл", etc.
+- unit_price (number or null) - Price per unit if separate column exists
+- total_price (number or null) - Total price/cost for this line item (convert from Russian format)
+- description (string or null) - Additional notes if any
+
+RULES:
+1. Extract EVERY row as a separate service - do not skip or combine rows
+2. Keep the FULL service name including all part numbers (CE285A, DK-1110, etc.) and equipment models
+3. Convert prices from Russian format (space separator, comma decimal) to numbers
+4. If only one price column exists, use it as total_price
+5. If table has no quantity column, set quantity to null (not 1)
+6. Return empty array if no services found, never return null
+
+DOCUMENT TEXT:
+{document_text}
+
+Return ONLY valid JSON:
+{{"services": [
+  {{"name": "Услуги по замене включая запчасть: CE285A- Оригинальный картридж Для HP LaserJet P1102", "quantity": null, "unit": "усл.ед.", "unit_price": null, "total_price": 7702.40, "description": null}},
+  {{"name": "Услуги по техническому обслуживанию принтера FS-1060DN", "quantity": null, "unit": "усл.ед.", "unit_price": null, "total_price": 1037.50, "description": null}},
+  ...
+]}}
 """

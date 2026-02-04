@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useDispatch } from 'react-redux';
-import { getContractData, getContractStatus, retryContract, getLLMInfo, get1CInfo } from '../services/contractService';
+import { getContractData, getContractStatus, retryContract, getLLMInfo, get1CInfo, refreshServices } from '../services/contractService';
 import { addNotification } from '../store/slices/uiSlice';
 import DataViewer from './DataViewer';
 import ValidationResults from './ValidationResults';
@@ -21,6 +21,8 @@ const ContractDetails = () => {
   const [activeTab, setActiveTab] = useState('overview');
   const [onecInfo, setOnecInfo] = useState(null);
   const [loadingOnecInfo, setLoadingOnecInfo] = useState(false);
+  const [allServices, setAllServices] = useState(null);
+  const [loadingServices, setLoadingServices] = useState(false);
 
   useEffect(() => {
     const loadContractDetails = async () => {
@@ -44,6 +46,10 @@ const ContractDetails = () => {
           try {
             const data = await getContractData(id);
             setContractData(data);
+            // Загружаем услуги из данных контракта, если они есть
+            if (data && data.all_services && Array.isArray(data.all_services) && data.all_services.length > 0) {
+              setAllServices(data.all_services);
+            }
           } catch (dataError) {
             // Если данные не найдены (404), это нормально для некоторых статусов
             if (dataError.response?.status === 404) {
@@ -163,6 +169,34 @@ const ContractDetails = () => {
     }
   };
 
+  const handleRefreshServices = async () => {
+    setLoadingServices(true);
+    try {
+      const result = await refreshServices(id);
+      if (result.success) {
+        setAllServices(result.services);
+        dispatch(addNotification({
+          type: 'success',
+          message: `Успешно извлечено ${result.services_count} услуг`,
+        }));
+        // Переключаемся на вкладку услуг
+        setActiveTab('services');
+      } else {
+        dispatch(addNotification({
+          type: 'error',
+          message: result.error || 'Ошибка при извлечении услуг',
+        }));
+      }
+    } catch (error) {
+      dispatch(addNotification({
+        type: 'error',
+        message: 'Ошибка при обновлении услуг',
+      }));
+    } finally {
+      setLoadingServices(false);
+    }
+  };
+
   if (loading) {
     return (
       <div className="flex justify-center items-center py-12">
@@ -225,6 +259,23 @@ const ContractDetails = () => {
           >
             Инфо
           </button>
+          <button
+            onClick={handleRefreshServices}
+            disabled={loadingServices}
+            className="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center"
+          >
+            {loadingServices ? (
+              <>
+                <svg className="animate-spin -ml-1 mr-2 h-4 w-4 text-white" fill="none" viewBox="0 0 24 24">
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                </svg>
+                Загрузка...
+              </>
+            ) : (
+              'Обновить услуги'
+            )}
+          </button>
           {contractStatus.status === 'failed' && (
             <button
               onClick={handleRetry}
@@ -253,44 +304,61 @@ const ContractDetails = () => {
       </div>
 
       {/* Вкладки */}
-      {contractData && (
-        <div className="bg-white rounded-lg shadow-sm border border-gray-200">
-          <div className="border-b border-gray-200">
-            <nav className="flex space-x-8 px-6" aria-label="Tabs">
-              <button
-                onClick={() => setActiveTab('overview')}
-                className={`py-4 px-1 border-b-2 font-medium text-sm ${
-                  activeTab === 'overview'
-                    ? 'border-blue-500 text-blue-600'
-                    : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
-                }`}
-              >
-                Обзор
-              </button>
-              <button
-                onClick={() => setActiveTab('data')}
-                className={`py-4 px-1 border-b-2 font-medium text-sm ${
-                  activeTab === 'data'
-                    ? 'border-blue-500 text-blue-600'
-                    : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
-                }`}
-              >
-                Данные
-              </button>
-              <button
-                onClick={() => setActiveTab('onec')}
-                className={`py-4 px-1 border-b-2 font-medium text-sm ${
-                  activeTab === 'onec'
-                    ? 'border-blue-500 text-blue-600'
-                    : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
-                }`}
-              >
-                Работа с 1С
-              </button>
-            </nav>
-          </div>
+      <div className="bg-white rounded-lg shadow-sm border border-gray-200">
+        <div className="border-b border-gray-200">
+          <nav className="flex space-x-8 px-6" aria-label="Tabs">
+            {contractData && (
+              <>
+                <button
+                  onClick={() => setActiveTab('overview')}
+                  className={`py-4 px-1 border-b-2 font-medium text-sm ${
+                    activeTab === 'overview'
+                      ? 'border-blue-500 text-blue-600'
+                      : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+                  }`}
+                >
+                  Обзор
+                </button>
+                <button
+                  onClick={() => setActiveTab('data')}
+                  className={`py-4 px-1 border-b-2 font-medium text-sm ${
+                    activeTab === 'data'
+                      ? 'border-blue-500 text-blue-600'
+                      : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+                  }`}
+                >
+                  Данные
+                </button>
+              </>
+            )}
+            <button
+              onClick={() => setActiveTab('onec')}
+              className={`py-4 px-1 border-b-2 font-medium text-sm ${
+                activeTab === 'onec'
+                  ? 'border-blue-500 text-blue-600'
+                  : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+              }`}
+            >
+              Работа с 1С
+            </button>
+            <button
+              onClick={() => setActiveTab('services')}
+              className={`py-4 px-1 border-b-2 font-medium text-sm ${
+                activeTab === 'services'
+                  ? 'border-blue-500 text-blue-600'
+                  : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+              }`}
+            >
+              Услуги
+              {allServices && allServices.length > 0 && (
+                <span className="ml-2 px-2 py-0.5 text-xs bg-purple-100 text-purple-800 rounded-full">
+                  {allServices.length}
+                </span>
+              )}
+            </button>
+          </nav>
         </div>
-      )}
+      </div>
 
       {/* Результаты валидации */}
       {validationResults && (
@@ -576,6 +644,134 @@ const ContractDetails = () => {
           ) : (
             <div className="text-center py-12 text-gray-500">
               Информация о работе с 1С недоступна
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Вкладка "Услуги" */}
+      {activeTab === 'services' && (
+        <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
+          <div className="flex justify-between items-center mb-4">
+            <h3 className="text-lg font-semibold text-gray-900">
+              Все услуги по договору
+              {allServices && allServices.length > 0 && (
+                <span className="ml-2 text-sm font-normal text-gray-500">
+                  ({allServices.length} услуг)
+                </span>
+              )}
+            </h3>
+            <button
+              onClick={handleRefreshServices}
+              disabled={loadingServices}
+              className="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center text-sm"
+            >
+              {loadingServices ? (
+                <>
+                  <svg className="animate-spin -ml-1 mr-2 h-4 w-4 text-white" fill="none" viewBox="0 0 24 24">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                  </svg>
+                  Извлечение...
+                </>
+              ) : (
+                <>
+                  <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                  </svg>
+                  Обновить
+                </>
+              )}
+            </button>
+          </div>
+
+          {loadingServices ? (
+            <div className="flex justify-center items-center py-12">
+              <LoadingSpinner size="md" />
+            </div>
+          ) : allServices && allServices.length > 0 ? (
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead className="bg-gray-50 border-b border-gray-200">
+                  <tr>
+                    <th className="px-4 py-3 text-left font-medium text-gray-600 w-12">№</th>
+                    <th className="px-4 py-3 text-left font-medium text-gray-600">Наименование</th>
+                    <th className="px-4 py-3 text-right font-medium text-gray-600 w-24">Кол-во</th>
+                    <th className="px-4 py-3 text-left font-medium text-gray-600 w-24">Ед. изм.</th>
+                    <th className="px-4 py-3 text-right font-medium text-gray-600 w-32">Цена за ед.</th>
+                    <th className="px-4 py-3 text-right font-medium text-gray-600 w-32">Сумма</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-200">
+                  {allServices.map((service, index) => (
+                    <tr key={index} className="hover:bg-gray-50">
+                      <td className="px-4 py-3 text-gray-500">{index + 1}</td>
+                      <td className="px-4 py-3 text-gray-900">
+                        <div>
+                          <div className="font-medium break-words">{service.name}</div>
+                          {service.description && (
+                            <div className="text-xs text-gray-500 mt-1 break-words">{service.description}</div>
+                          )}
+                        </div>
+                      </td>
+                      <td className="px-4 py-3 text-right text-gray-900">
+                        {service.quantity != null ? service.quantity : '—'}
+                      </td>
+                      <td className="px-4 py-3 text-gray-600">
+                        {service.unit || '—'}
+                      </td>
+                      <td className="px-4 py-3 text-right text-gray-900">
+                        {service.unit_price != null
+                          ? `${parseFloat(service.unit_price).toLocaleString('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ₽`
+                          : '—'}
+                      </td>
+                      <td className="px-4 py-3 text-right font-medium text-gray-900">
+                        {service.total_price != null
+                          ? `${parseFloat(service.total_price).toLocaleString('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ₽`
+                          : '—'}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+                {/* Итого */}
+                {allServices.some(s => s.total_price != null) && (
+                  <tfoot className="bg-gray-50 border-t-2 border-gray-300">
+                    <tr>
+                      <td colSpan="5" className="px-4 py-3 text-right font-semibold text-gray-700">
+                        Итого:
+                      </td>
+                      <td className="px-4 py-3 text-right font-bold text-gray-900">
+                        {allServices
+                          .filter(s => s.total_price != null)
+                          .reduce((sum, s) => sum + parseFloat(s.total_price), 0)
+                          .toLocaleString('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ₽
+                      </td>
+                    </tr>
+                  </tfoot>
+                )}
+              </table>
+            </div>
+          ) : (
+            <div className="text-center py-12">
+              <svg className="mx-auto h-12 w-12 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01" />
+              </svg>
+              <h3 className="mt-2 text-sm font-medium text-gray-900">Услуги не загружены</h3>
+              <p className="mt-1 text-sm text-gray-500">
+                Нажмите кнопку "Обновить" для извлечения списка услуг из документа.
+              </p>
+              <div className="mt-6">
+                <button
+                  onClick={handleRefreshServices}
+                  disabled={loadingServices}
+                  className="inline-flex items-center px-4 py-2 border border-transparent shadow-sm text-sm font-medium rounded-md text-white bg-purple-600 hover:bg-purple-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-purple-500 disabled:opacity-50"
+                >
+                  <svg className="-ml-1 mr-2 h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                  </svg>
+                  Извлечь услуги
+                </button>
+              </div>
             </div>
           )}
         </div>

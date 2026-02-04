@@ -34,6 +34,18 @@ class StorageService:
                    storage_path=str(self.storage_path),
                    storage_type=self.storage_type)
     
+    def _compute_hash(self, file_content: bytes) -> str:
+        """
+        Вычислить SHA256 хеш файла
+        
+        Args:
+            file_content: Содержимое файла в байтах
+            
+        Returns:
+            SHA256 хеш в виде hex строки
+        """
+        return hashlib.sha256(file_content).hexdigest()
+    
     def save_uploaded_file(self, file_content: bytes, filename: str) -> Tuple[str, str]:
         """
         Сохранить загруженный файл
@@ -58,7 +70,7 @@ class StorageService:
             file_path.write_bytes(file_content)
             
             # Вычисляем хеш файла
-            file_hash = hashlib.sha256(file_content).hexdigest()
+            file_hash = self._compute_hash(file_content)
             
             logger.info("File saved", 
                        filename=filename,
