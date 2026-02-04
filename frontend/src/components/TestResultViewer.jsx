@@ -141,16 +141,26 @@ const TestResultViewer = ({ contractId, contractStatus, onClose }) => {
     }
   };
 
-  // Находим последний запрос агрегации
+  // Находим последний запрос агрегации или последний успешный запрос с response_data
   const getLastAggregationRequest = () => {
     if (!llmInfo || !llmInfo.requests) return null;
-    
-    // Ищем последний запрос с типом aggregation
+
+    // Ищем последний запрос с типом aggregation или aggregation_parallel
     for (let i = llmInfo.requests.length - 1; i >= 0; i--) {
-      if (llmInfo.requests[i].request_type === 'aggregation') {
+      const requestType = llmInfo.requests[i].request_type;
+      if (requestType === 'aggregation' || requestType === 'aggregation_parallel') {
         return llmInfo.requests[i];
       }
     }
+
+    // Если агрегации не найдено, возвращаем последний успешный запрос с response_data (для single документов)
+    for (let i = llmInfo.requests.length - 1; i >= 0; i--) {
+      const request = llmInfo.requests[i];
+      if (request.request_type === 'single' && request.status === 'success' && request.response_data) {
+        return request;
+      }
+    }
+
     return null;
   };
 
@@ -340,8 +350,11 @@ const TestResultViewer = ({ contractId, contractStatus, onClose }) => {
                   )}
                   
                   {llmInfo.requests.map((request, index) => {
-                    const isLastAggregation = request.request_type === 'aggregation' && 
-                                            request === getLastAggregationRequest();
+                    // Проверяем, является ли это последним агрегирующим запросом (или single запросом для небольших документов)
+                    const isLastAggregation = request === getLastAggregationRequest() &&
+                      (request.request_type === 'aggregation' ||
+                       request.request_type === 'aggregation_parallel' ||
+                       request.request_type === 'single');
                     
                     return (
                       <div key={index} className="border border-gray-200 rounded-lg p-4">
@@ -349,14 +362,19 @@ const TestResultViewer = ({ contractId, contractStatus, onClose }) => {
                           <div className="flex-1">
                             <h4 className="font-semibold text-gray-900">
                               Запрос #{index + 1}
-                              {request.request_type === 'chunk' && (
+                              {(request.request_type === 'chunk' || request.request_type === 'chunk_parallel') && (
                                 <span className="ml-2 text-sm text-gray-600">
                                   (Чанк {request.chunk_index} из {request.total_chunks})
                                 </span>
                               )}
-                              {request.request_type === 'aggregation' && (
+                              {(request.request_type === 'aggregation' || request.request_type === 'aggregation_parallel') && (
                                 <span className="ml-2 text-sm text-gray-600">
                                   (Агрегация результатов)
+                                </span>
+                              )}
+                              {request.request_type === 'single' && (
+                                <span className="ml-2 text-sm text-gray-600">
+                                  (Единый запрос)
                                 </span>
                               )}
                             </h4>

@@ -918,50 +918,21 @@ class MCPServer:
                            has_service_dates=bool(service_start_date and service_end_date),
                            has_contract_date=bool(contract_date))
                 
-                # Формируем наименование договора
-                # Приоритет: contract_name + contract_number + date > contract_number + date > contract_name > базовое значение
-                agreement_description = ''
+                # Формируем наименование договора в формате "Договор №... от ..."
+                # Приоритет: номер + дата > только дата > базовое значение
                 date_str = self._format_date(contract_date) if contract_date else ''
-                
-                if contract_name and contract_name.strip() and contract_name.strip() != 'Контракт':
-                    # Используем название договора
-                    agreement_description = contract_name.strip()
-                    # Добавляем номер, если есть
-                    if contract_number:
-                        agreement_description = f"{agreement_description} №{contract_number}"
-                    # Добавляем дату, если есть
-                    if date_str:
-                        agreement_description = f"{agreement_description} от {date_str}"
-                elif contract_number:
-                    # Если нет названия, но есть номер
-                    agreement_description = f"Договор №{contract_number}"
-                    if date_str:
-                        agreement_description += f" от {date_str}"
-                elif contract_name and contract_name.strip():
-                    # Если есть только название (даже если оно "Контракт")
-                    agreement_description = contract_name.strip()
-                    if date_str:
-                        agreement_description += f" от {date_str}"
-                else:
-                    # Если нет ни имени, ни номера договора, создаем базовое наименование
-                    agreement_description = "Договор"
-                    if date_str:
-                        agreement_description += f" от {date_str}"
-                
-                # Если наименование все еще пустое или равно базовому значению, используем наименование контрагента
-                if not agreement_description or agreement_description.strip() == 'Контракт':
-                    if short_name_formatted or full_name_with_opf:
-                        agreement_description = f"Договор с {short_name_formatted or full_name_with_opf}"
-                        if contract_number:
-                            agreement_description += f" №{contract_number}"
-                        if date_str:
-                            agreement_description += f" от {date_str}"
-                    else:
-                        agreement_description = "Договор"
-                        if date_str:
-                            agreement_description += f" от {date_str}"
-                    logger.info("Using counterparty name for agreement description",
-                               agreement_description=agreement_description)
+
+                # Всегда начинаем с "Договор"
+                agreement_description = "Договор"
+                if contract_number:
+                    agreement_description = f"{agreement_description} №{contract_number}"
+                if date_str:
+                    agreement_description = f"{agreement_description} от {date_str}"
+
+                logger.info("Formed agreement description",
+                           agreement_description=agreement_description,
+                           contract_number=contract_number,
+                           contract_date=contract_date)
                 
                 # Определяем вид договора на основе роли
                 agreement_type = 'СПокупателем' if is_buyer else 'СПоставщиком'
@@ -1037,6 +1008,8 @@ class MCPServer:
                 agreement_data = {
                     'counterparty_uuid': counterparty_uuid,
                     'name': agreement_description,
+                    'contract_number': contract_number,
+                    'contract_date': contract_date,
                     'term': term_date_iso,
                     'price': contract_price,
                     'allowed_debt_amount': allowed_debt_amount,
@@ -1197,15 +1170,24 @@ class MCPServer:
         """
         if not self.oneс_client:
             raise RuntimeError("1C client not initialized")
-        
+
         counterparty_uuid = params.get('counterparty_uuid')
         note_text = params.get('note_text')
-        
+
         if not counterparty_uuid:
             raise ValueError("counterparty_uuid is required")
-        
+
+        # Если note_text не передан, но есть параметры контракта - формируем заметку через _prepare_note
         if not note_text:
-            raise ValueError("note_text is required")
+            # Определяем роль контрагента для формирования заметки
+            role = params.get('role', '')
+            counterparty_role = role if role else 'Поставщик'  # По умолчанию
+
+            # Формируем заметку из параметров контракта
+            note_text = self._prepare_note(params, counterparty_role)
+
+            if not note_text:
+                raise ValueError("note_text is required or contract params must be provided to generate note")
         
         # Проверяем существование контрагента
         try:
@@ -1584,25 +1566,15 @@ class MCPServer:
         service_end_date = params.get('service_end_date')
         payment_terms = params.get('payment_terms')
         
-        # Правило 2.10.1: Наименование договора с датой заключения
-        # Формируем наименование: наименование контракта + дата заключения
-        agreement_description = ''
+        # Правило 2.10.1: Наименование договора в формате "Договор №... от ..."
         date_str = self._format_date(contract_date) if contract_date else ''
-        
-        if contract_name and contract_name.strip():
-            agreement_description = contract_name.strip()
-            if contract_number:
-                agreement_description = f"{agreement_description} №{contract_number}"
-            if date_str:
-                agreement_description = f"{agreement_description} от {date_str}"
-        elif contract_number:
-            agreement_description = f"Договор №{contract_number}"
-            if date_str:
-                agreement_description = f"{agreement_description} от {date_str}"
-        else:
-            agreement_description = "Договор"
-            if date_str:
-                agreement_description = f"{agreement_description} от {date_str}"
+
+        # Всегда начинаем с "Договор"
+        agreement_description = "Договор"
+        if contract_number:
+            agreement_description = f"{agreement_description} №{contract_number}"
+        if date_str:
+            agreement_description = f"{agreement_description} от {date_str}"
         
         # Правило 2.10.3: Срок действия (срок оказания услуг или поставки товаров)
         term_date = params.get('term')

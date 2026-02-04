@@ -697,7 +697,14 @@ async def create_counterparty_in_1c(
         # Используем данные из запроса (из LLM ответа)
         # ВАЖНО: Всегда используем customer (заказчик), как при обычной обработке
         llm_data = request.contract_data
-        
+
+        # Логируем входящие данные для отладки
+        logger.info("Received LLM data for 1C creation",
+                   contract_id=contract_id,
+                   llm_data_keys=list(llm_data.keys()) if isinstance(llm_data, dict) else None,
+                   contract_number=llm_data.get('contract_number') if isinstance(llm_data, dict) else None,
+                   contract_date=llm_data.get('contract_date') if isinstance(llm_data, dict) else None)
+
         # Определяем источник данных контрагента
         # Приоритет: customer -> корневые поля (legacy формат)
         counterparty_source = None
@@ -738,6 +745,7 @@ async def create_counterparty_in_1c(
                 'vat_type': llm_data.get('vat_type'),
                 'service_description': llm_data.get('service_description'),
                 'services': llm_data.get('services'),
+                'all_services': llm_data.get('all_services'),  # Услуги из шага 3.5
                 'service_start_date': llm_data.get('service_start_date'),
                 'service_end_date': llm_data.get('service_end_date'),
                 'locations': llm_data.get('locations') or llm_data.get('service_locations'),
@@ -753,10 +761,42 @@ async def create_counterparty_in_1c(
                 'technical_info': llm_data.get('technical_info'),
                 'task_execution_term': llm_data.get('task_execution_term'),
             }
-            
-            logger.info("Using contract data from LLM response", 
+
+            # Дополняем данные из БД, если чего-то не хватает в LLM ответе
+            # (некоторые поля могут отсутствовать в ответе агрегации)
+            contract_data_db = db.query(ContractData).filter(
+                ContractData.contract_id == contract_id
+            ).first()
+
+            if contract_data_db:
+                # Дополняем отсутствующие поля из БД
+                if not contract_data_dict.get('all_services') and contract_data_db.all_services:
+                    contract_data_dict['all_services'] = contract_data_db.all_services
+                    logger.info("Loaded all_services from database", contract_id=contract_id)
+
+                if not contract_data_dict.get('contract_number') and contract_data_db.contract_number:
+                    contract_data_dict['contract_number'] = contract_data_db.contract_number
+                    logger.info("Loaded contract_number from database", contract_id=contract_id, contract_number=contract_data_db.contract_number)
+
+                if not contract_data_dict.get('contract_date') and contract_data_db.contract_date:
+                    contract_data_dict['contract_date'] = contract_data_db.contract_date.isoformat() if contract_data_db.contract_date else None
+                    logger.info("Loaded contract_date from database", contract_id=contract_id, contract_date=contract_data_dict['contract_date'])
+
+                if not contract_data_dict.get('contract_price') and contract_data_db.contract_price:
+                    contract_data_dict['contract_price'] = float(contract_data_db.contract_price)
+
+                if not contract_data_dict.get('service_start_date') and contract_data_db.service_start_date:
+                    contract_data_dict['service_start_date'] = contract_data_db.service_start_date.isoformat()
+
+                if not contract_data_dict.get('service_end_date') and contract_data_db.service_end_date:
+                    contract_data_dict['service_end_date'] = contract_data_db.service_end_date.isoformat()
+
+            logger.info("Using contract data from LLM response",
                        contract_id=contract_id,
                        has_inn=bool(contract_data_dict.get('inn')),
+                       has_all_services=bool(contract_data_dict.get('all_services')),
+                       contract_number=contract_data_dict.get('contract_number'),
+                       contract_date=contract_data_dict.get('contract_date'),
                        role=role,
                        counterparty_source='customer' if llm_data.get('customer') else 'root')
         else:
@@ -794,6 +834,7 @@ async def create_counterparty_in_1c(
             'vat_type': contract_data_db.vat_type.value if contract_data_db.vat_type else None,
             'service_description': contract_data_db.service_description,
             'services': contract_data_db.services,
+            'all_services': contract_data_db.all_services,  # Услуги из шага 3.5
             'service_start_date': contract_data_db.service_start_date.isoformat() if contract_data_db.service_start_date else None,
             'service_end_date': contract_data_db.service_end_date.isoformat() if contract_data_db.service_end_date else None,
             'locations': contract_data_db.locations,
@@ -801,14 +842,16 @@ async def create_counterparty_in_1c(
             'customer': contract_data_db.customer,
             'contractor': contract_data_db.contractor,
         }
-        
+
         # Определяем роль на основе is_supplier/is_buyer
         if contract_data_db.is_supplier:
             contract_data_dict['role'] = 'Поставщик'
         elif contract_data_db.is_buyer:
             contract_data_dict['role'] = 'Заказчик'
-        
-        logger.info("Using contract data from database", contract_id=contract_id)
+
+        logger.info("Using contract data from database",
+                   contract_id=contract_id,
+                   has_all_services=bool(contract_data_db.all_services))
     
     # Проверяем наличие данных и ИНН
     if not contract_data_dict:

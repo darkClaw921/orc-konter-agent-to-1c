@@ -169,7 +169,7 @@ class OneCService:
                     "vat_percent": contract_data.get("vat_percent"),
                     "vat_type": contract_data.get("vat_type"),
                     "service_description": contract_data.get("service_description"),
-                    "services": contract_data.get("services"),
+                    "services": contract_data.get("all_services") or contract_data.get("services"),  # Приоритет all_services из шага 3.5
                     "acceptance_procedure": contract_data.get("acceptance_procedure"),
                     "specification_exists": contract_data.get("specification_exists"),
                     "pricing_method": contract_data.get("pricing_method"),
@@ -188,7 +188,16 @@ class OneCService:
                 
                 # Сериализуем данные для JSON (преобразуем date, datetime, Decimal)
                 params_serialized = _serialize_for_json(params)
-                
+
+                # Логируем информацию об услугах и договоре
+                services_data = params_serialized.get('services') or params_serialized.get('all_services')
+                logger.info("Creating counterparty with data",
+                           inn=params_serialized.get('inn'),
+                           contract_number=params_serialized.get('contract_number'),
+                           contract_date=params_serialized.get('contract_date'),
+                           has_services=bool(services_data),
+                           services_count=len(services_data) if isinstance(services_data, list) else 0)
+
                 async with session.post(
                     f"{self.mcp_service_url}/command",
                     json={
@@ -396,6 +405,182 @@ class OneCService:
             return None
         except Exception as e:
             logger.error("Failed to add note to counterparty in 1C",
+                        error=str(e) or f"Unknown error: {type(e).__name__}",
+                        error_type=type(e).__name__,
+                        counterparty_uuid=counterparty_uuid)
+            return None
+
+    async def add_agreement_to_existing_counterparty(
+        self,
+        counterparty_uuid: str,
+        contract_data: Dict[str, Any],
+        document_path: str,
+        raw_text: Optional[str] = None
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Добавить договор и заметку к существующему контрагенту в 1С.
+
+        Используется когда контрагент уже существует в справочнике 1С, но нужно
+        добавить новый договор с информацией о контракте.
+
+        Args:
+            counterparty_uuid: UUID существующего контрагента в 1С
+            contract_data: Извлеченные данные контракта (включая all_services)
+            document_path: Путь к файлу контракта
+            raw_text: Полный текст документа
+
+        Returns:
+            Dict с результатом: {'note_uuid': str, 'agreement_uuid': str, 'entity': dict} или None
+        """
+        try:
+            async with aiohttp.ClientSession() as session:
+                # Определяем роль контрагента для заметки
+                role_value = contract_data.get("role")
+                role = str(role_value or "").lower()
+                is_supplier = "поставщик" in role or "продавец" in role or "исполнитель" in role
+                is_buyer = "покупатель" in role or "заказчик" in role
+
+                # Извлекаем допустимое число дней задолженности из условий оплаты
+                allowed_debt_days = None
+                payment_terms = contract_data.get("payment_terms")
+                if payment_terms:
+                    import re
+                    days_patterns = [
+                        r'(\d+)\s*календарн[ы]?х?\s*дн[ея]й?',
+                        r'(\d+)\s*рабоч[иі]х?\s*дн[ея]й?',
+                        r'(\d+)\s*дн[ея]й?\s*отсрочк',
+                        r'отсрочк[аи]?\s*(\d+)\s*дн',
+                        r'(\d+)\s*дн[ея]й?\s*оплат',
+                        r'срок\s*не\s*более\s*(\d+)',
+                        r'течение\s*(\d+)\s*дн'
+                    ]
+                    for pattern in days_patterns:
+                        match = re.search(pattern, str(payment_terms), re.IGNORECASE)
+                        if match:
+                            try:
+                                allowed_debt_days = int(match.group(1))
+                                logger.info("Extracted allowed_debt_days from payment_terms for existing counterparty",
+                                           days=allowed_debt_days,
+                                           pattern=pattern)
+                                break
+                            except (ValueError, IndexError):
+                                continue
+
+                # Формируем описание договора в формате "Договор №... от ..."
+                contract_number = contract_data.get("contract_number")
+                contract_date = contract_data.get("contract_date")
+
+                # Всегда начинаем с "Договор"
+                agreement_description = "Договор"
+                if contract_number:
+                    agreement_description = f"{agreement_description} №{contract_number}"
+                if contract_date:
+                    # Форматируем дату
+                    if isinstance(contract_date, str):
+                        try:
+                            from datetime import datetime
+                            date_obj = datetime.strptime(contract_date, '%Y-%m-%d').date()
+                            date_str = date_obj.strftime('%d.%m.%Y')
+                            agreement_description = f"{agreement_description} от {date_str}"
+                        except:
+                            agreement_description = f"{agreement_description} от {contract_date}"
+                    else:
+                        agreement_description = f"{agreement_description} от {contract_date}"
+
+                # Подготавливаем параметры для команды add_note
+                # add_note создает заметку И договор автоматически
+                params = {
+                    "counterparty_uuid": counterparty_uuid,
+                    # Данные для формирования заметки (правило 2.9)
+                    "contract_name": contract_data.get("contract_name"),
+                    "contract_number": contract_data.get("contract_number"),
+                    "contract_date": contract_data.get("contract_date"),
+                    "contract_price": contract_data.get("contract_price"),
+                    "vat_percent": contract_data.get("vat_percent"),
+                    "vat_type": contract_data.get("vat_type"),
+                    "service_description": contract_data.get("service_description"),
+                    "services": contract_data.get("all_services") or contract_data.get("services"),  # Услуги для заметки
+                    "service_start_date": contract_data.get("service_start_date"),
+                    "service_end_date": contract_data.get("service_end_date"),
+                    "acceptance_procedure": contract_data.get("acceptance_procedure"),
+                    "specification_exists": contract_data.get("specification_exists"),
+                    "pricing_method": contract_data.get("pricing_method"),
+                    "reporting_forms": contract_data.get("reporting_forms"),
+                    "additional_conditions": contract_data.get("additional_conditions"),
+                    "technical_info": contract_data.get("technical_info"),
+                    "task_execution_term": contract_data.get("task_execution_term"),
+                    "payment_terms": payment_terms,
+                    "customer": contract_data.get("customer"),
+                    "contractor": contract_data.get("contractor"),
+                    "role": contract_data.get("role", ""),
+                    "raw_text": raw_text,
+                    # Параметры для создания договора
+                    "create_agreement": True,
+                    "agreement_description": agreement_description,
+                    "is_supplier": is_supplier,
+                    "is_buyer": is_buyer,
+                    "allowed_debt_days": allowed_debt_days,
+                }
+
+                # Сериализуем данные для JSON
+                params_serialized = _serialize_for_json(params)
+
+                async with session.post(
+                    f"{self.mcp_service_url}/command",
+                    json={
+                        "command": "add_note",
+                        "params": params_serialized
+                    },
+                    timeout=aiohttp.ClientTimeout(total=self.timeout)
+                ) as response:
+                    if response.status == 200:
+                        response_data = await response.json()
+                        if response_data.get("status") == "success":
+                            result = response_data.get("result", {})
+                            note_uuid = result.get("uuid")
+                            agreement_uuid = result.get("agreement_uuid")
+
+                            logger.info("Added note and agreement to existing counterparty",
+                                      counterparty_uuid=counterparty_uuid,
+                                      note_uuid=note_uuid,
+                                      agreement_uuid=agreement_uuid)
+
+                            # Прикрепить файл контракта к договору (если создан) или к контрагенту
+                            if counterparty_uuid and document_path:
+                                await self.attach_file(counterparty_uuid, document_path, agreement_uuid=agreement_uuid)
+
+                            return {
+                                'note_uuid': note_uuid,
+                                'agreement_uuid': agreement_uuid,
+                                'entity': result.get('entity', {})
+                            }
+                        else:
+                            error_msg = response_data.get("error", "Unknown error")
+                            logger.error("Failed to add note and agreement to existing counterparty",
+                                       error=error_msg,
+                                       counterparty_uuid=counterparty_uuid)
+                            return None
+                    else:
+                        error_text = await response.text()
+                        logger.error("Failed to add note and agreement to existing counterparty",
+                                   status=response.status,
+                                   error=error_text,
+                                   counterparty_uuid=counterparty_uuid)
+                        return None
+        except asyncio.TimeoutError:
+            logger.error("Failed to add note and agreement to existing counterparty",
+                        error=f"Timeout after {self.timeout} seconds",
+                        error_type="timeout",
+                        counterparty_uuid=counterparty_uuid)
+            return None
+        except aiohttp.ClientError as e:
+            logger.error("Failed to add note and agreement to existing counterparty",
+                        error=f"HTTP client error: {type(e).__name__}: {str(e)}",
+                        error_type="client_error",
+                        counterparty_uuid=counterparty_uuid)
+            return None
+        except Exception as e:
+            logger.error("Failed to add note and agreement to existing counterparty",
                         error=str(e) or f"Unknown error: {type(e).__name__}",
                         error_type=type(e).__name__,
                         counterparty_uuid=counterparty_uuid)

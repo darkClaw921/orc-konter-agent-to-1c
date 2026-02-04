@@ -34,7 +34,7 @@ class Settings(BaseSettings):
     LLM_REQUEST_TIMEOUT: int = 300  # 5 минут для обработки больших документов
 
     # Document Chunking Configuration
-    MAX_CHUNK_TOKENS: int = 8000  # Максимальное количество токенов на чанк
+    MAX_CHUNK_TOKENS: int = 32000  # Максимальное количество токенов на чанк
     MAX_TABLE_CHUNK_TOKENS: int = 2000  # Максимальное количество токенов на чанк для таблиц
     CHUNK_OVERLAP_TOKENS: int = 200  # Перекрытие между чанками в токенах
     

@@ -54,7 +54,7 @@ backend/
 │   │   ├── llm_service.py            # Интеграция с LLM провайдерами с ПАРАЛЛЕЛЬНОЙ обработкой чанков БАТЧАМИ и улучшенной обработкой ошибок соединения с подробным логированием (MAX_CONCURRENT_REQUESTS=3, BATCH_SIZE=50, DEFAULT_RETRY_COUNT=3, CONNECTION_ERROR_RETRY_COUNT=5, asyncio.Semaphore; LLMService: extract_contract_data, validate_extracted_data, aggregate_chunks_data, merge_extracted_data, extract_services_from_chunks (параллельно батчами по 50 через asyncio.gather), extract_contract_data_parallel (параллельно батчами по 50), _extract_services_from_chunk_with_retry, _extract_contract_data_from_chunk_with_retry, _is_connection_error, _calculate_retry_delay с экспоненциальным backoff и jitter; подробное логирование с traceback, временем выполнения, размером данных, типом ошибки, контекстом чанка; BaseLLMProvider: extract_services_only; OpenAIProvider с httpx.Timeout (connect=30s, read=LLM_REQUEST_TIMEOUT=300s, write=60s, pool=10s) для обработки больших документов и обработкой APIConnectionError/APITimeoutError с детальным логированием, YandexGPTProvider)
 │   │   ├── prompts.py                # Prompt templates для LLM (EXTRACT_CONTRACT_DATA_PROMPT, VALIDATE_EXTRACTED_DATA_PROMPT, MERGE_CHUNKS_DATA_PROMPT, EXTRACT_SERVICES_ONLY_PROMPT)
 │   │   ├── validation_service.py     # Валидация извлеченных данных (ValidationService: validate_contract_data, auto_correct_data, _perform_additional_checks) - улучшенная очистка ИНН от префиксов
-│   │   ├── oneс_service.py          # Интеграция с 1С через MCP (OneCService)
+│   │   ├── oneс_service.py          # Интеграция с 1С через MCP (OneCService: find_counterparty_by_inn, create_counterparty, attach_file, add_note_to_counterparty, add_agreement_to_existing_counterparty - для добавления договора и заметки к существующему контрагенту)
 │   │   └── storage_service.py        # Управление хранилищем файлов (StorageService: save_uploaded_file, move_to_processed, delete_file)
 │   │
 │   ├── testing/                       # Система автоматического тестирования
@@ -64,7 +64,7 @@ backend/
 │   │
 │   ├── agent/                         # SGR Agent Core
 │   │   ├── __init__.py
-│   │   ├── orchestrator.py           # Оркестрация обработки контракта с ПАРАЛЛЕЛЬНОЙ обработкой чанков БАТЧАМИ и улучшенной обработкой частичных сбоев с подробным логированием (AgentOrchestrator: process_contract, _extract_contract_data с extract_contract_data_parallel (батчи по 50) для извлечения ТОЛЬКО основных данных контракта БЕЗ услуг и обработкой failed_chunks, статистикой успешных/неуспешных чанков, предупреждениями при большом количестве сбоев, детальным логированием ошибок с traceback, контекстом чанков, размерами данных, индексами неуспешных чанков, _extract_all_services с параллельным extract_services_from_chunks (батчи по 50) для извлечения ВСЕХ услуг отдельным запросом в шаге 3.5, _validate_data, _check_counterparty, _create_in_1c, _build_chunk_context БЕЗ секции услуг, _prepare_counterparty_data)
+│   │   ├── orchestrator.py           # Оркестрация обработки контракта с ПАРАЛЛЕЛЬНОЙ обработкой чанков БАТЧАМИ и улучшенной обработкой частичных сбоев с подробным логированием (AgentOrchestrator: process_contract, _extract_contract_data с extract_contract_data_parallel (батчи по 50) для извлечения ТОЛЬКО основных данных контракта БЕЗ услуг и обработкой failed_chunks, статистикой успешных/неуспешных чанков, предупреждениями при большом количестве сбоев, детальным логированием ошибок с traceback, контекстом чанков, размерами данных, индексами неуспешных чанков, _extract_all_services с параллельным extract_services_from_chunks (батчи по 50) для извлечения ВСЕХ услуг отдельным запросом в шаге 3.5, _validate_data, _check_counterparty, _create_in_1c, _add_agreement_to_existing_counterparty - добавляет договор и заметку к существующему контрагенту с полным списком услуг из all_services, _build_chunk_context БЕЗ секции услуг, _prepare_counterparty_data с передачей all_services)
 │   │   └── state_manager.py          # Управление состоянием агента (StateManager, AgentState)
 │   │
 │   ├── tasks/                         # Celery задачи
@@ -242,6 +242,8 @@ mcp_service/
    - `_prepare_note` - формирует заметку для контрагента со всей информацией о контракте, включая услуги из `all_services` (извлеченные в шаге 3.5) в конце заметки (название, количество, единица измерения, цена за единицу, общая стоимость)
    - `_update_counterparty` - обновляет данные существующего контрагента
    - `_create_agreement` - создает договор с контрагентом
+   - `_add_note` - добавляет заметку к существующему контрагенту и автоматически создает договор. Если `note_text` не передан, формирует заметку из параметров контракта через `_prepare_note` (включая полный список услуг из `all_services`)
+   - `_add_agreement` - создает договор для существующего контрагента (вызывается из `_add_note` после создания заметки)
    - `_attach_file` - прикрепляет файл контракта к контрагенту или договору через каталог Catalog_ХранилищеДополнительнойИнформации (поддерживает параметры counterparty_uuid, agreement_uuid, file_path, file_name)
    - `_get_one_counterparty` - получает одного контрагента из 1С (первого из списка) для тестирования подключения
 2. **OData Client** (`client/oneс_client.py`) - взаимодействует с 1С через OData API:
@@ -273,7 +275,9 @@ mcp_service/
    - **Шаг 3.5: Параллельное извлечение ВСЕХ услуг отдельным запросом БАТЧАМИ** через `_extract_all_services()`: после основного извлечения данных выполняется ОТДЕЛЬНОЕ ПАРАЛЛЕЛЬНОЕ извлечение услуг через `LLMService.extract_services_from_chunks()` со специализированным промптом `EXTRACT_SERVICES_ONLY_PROMPT`. Чанки разбиваются на батчи по 50 штук (`BATCH_SIZE=50`) и каждый батч обрабатывается параллельно через `asyncio.gather()` с ограничением до 3 одновременных запросов. Специализированный промпт оптимизирован для извлечения ВСЕХ строк из таблиц спецификаций. Результаты агрегируются с дедупликацией по названию услуги. Результат сохраняется в `state.extracted_data['all_services']`. Промпт учитывает русский формат цен (пробел как разделитель тысяч, запятая для десятичных: "7 702,40" → 7702.40). Информация о запросе логируется в `state.llm_requests` с типом `services_extraction_parallel`. Преимущества: специализированный промпт лучше справляется с извлечением всех строк из таблиц, уменьшение размера промптов в шаге 3 улучшает качество извлечения основных данных
    - Валидирует данные через `ValidationService` (с улучшенной очисткой ИНН от префиксов)
    - Проверяет наличие контрагента в 1С через `OneCService` -> MCP Service
-   - Создает контрагента в 1С если не найден
+   - **Шаг 6: Работа с контрагентом в 1С**:
+     - **Если контрагент НЕ найден**: Создает нового контрагента в 1С с заметкой (содержит информацию о контракте и полный список услуг из `all_services`) и договором
+     - **Если контрагент уже СУЩЕСТВУЕТ в 1С**: Добавляет к существующему контрагенту новый договор и дописывает в заметку информацию о новом контракте (включая полный список услуг из `all_services`). Для этого используется метод `add_agreement_to_existing_counterparty` в OneCService, который вызывает MCP команду `add_note` - она автоматически создает заметку и договор
    - Прикрепляет файл контракта к договору (если создан) или к контрагенту через каталог Catalog_ХранилищеДополнительнойИнформации
 5. **State Manager** - сохраняет состояние обработки в Redis на каждом этапе
 6. **Frontend** - периодически опрашивает статус через `GET /contracts/{id}/status` и отображает результаты
@@ -366,3 +370,41 @@ mcp_service/
 - Создан автоматический тест `test_no_duplicate_services.py` для верификации изменений
 - Все тесты пройдены успешно ✅
 - Создан документ `IMPLEMENTATION_SUMMARY.md` с детальным описанием изменений и чек-листом для проверки
+
+### Добавление договора и заметки к существующему контрагенту
+
+**Проблема**: Ранее, когда контрагент уже существовал в 1С, система просто пропускала создание без добавления договора и заметки для нового контракта.
+
+**Решение**: Реализована логика добавления договора и заметки к существующему контрагенту.
+
+**Изменения**:
+
+1. **`backend/app/services/oneс_service.py`**:
+   - Обновлен метод `create_counterparty` - теперь передает `all_services` вместо `services` для формирования заметки
+   - Добавлен новый метод `add_agreement_to_existing_counterparty(counterparty_uuid, contract_data, document_path, raw_text)`:
+     - Принимает UUID существующего контрагента и данные контракта
+     - Формирует описание договора из названия, номера и даты контракта
+     - Передает все параметры контракта (включая `all_services`) для формирования заметки
+     - Вызывает MCP команду `add_note` которая создает заметку и договор
+     - После создания прикрепляет файл контракта к договору
+
+2. **`backend/app/agent/orchestrator.py`**:
+   - Изменен метод `_create_counterparty_in_1c` - при наличии `existing_counterparty_id` вызывает `_add_agreement_to_existing_counterparty`
+   - Добавлен новый метод `_add_agreement_to_existing_counterparty(state)`:
+     - Подготавливает данные контрагента через `_prepare_counterparty_data`
+     - Вызывает `OneCService.add_agreement_to_existing_counterparty`
+     - Сохраняет информацию о созданном договоре в БД (таблица `counterparty_1c`)
+     - Обновляет прогресс обработки
+   - Обновлен метод `_prepare_counterparty_data` - добавлена передача `all_services`
+   - Добавлен импорт `Contract` из models
+
+3. **`mcp_service/server/mcp_server.py`**:
+   - Изменен метод `_add_note`:
+     - Если `note_text` не передан напрямую, формирует заметку из параметров контракта через `_prepare_note`
+     - Позволяет передавать параметры контракта (включая услуги) вместо готового текста заметки
+
+**Преимущества**:
+- При повторной загрузке контракта для существующего контрагента автоматически создается новый договор
+- Заметка содержит полную информацию о контракте, включая все услуги из `all_services`
+- Файл контракта прикрепляется к договору
+- Сохраняется связь между контрактом и созданным договором в БД
