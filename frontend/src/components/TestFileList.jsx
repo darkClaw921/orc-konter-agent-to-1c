@@ -1,12 +1,33 @@
 import React from 'react';
 import LoadingSpinner from './LoadingSpinner';
+import ProgressBar from './ProgressBar';
 
 const TestFileList = ({ files, onProcessFile, onViewResults, onReprocessFile, processingFiles }) => {
+  // Статусы, при которых показываем прогресс-бар
+  const processingStates = [
+    'uploaded',
+    'processing',
+    'document_loaded',
+    'text_extracted',
+    'data_extracted',
+    'services_extracted',
+    'checking_1c',
+    'creating_in_1c',
+  ];
+
   const getStatusColor = (status) => {
     const colors = {
       uploaded: 'bg-blue-100 text-blue-800',
       processing: 'bg-yellow-100 text-yellow-800',
+      document_loaded: 'bg-yellow-100 text-yellow-800',
+      text_extracted: 'bg-yellow-100 text-yellow-800',
+      data_extracted: 'bg-yellow-100 text-yellow-800',
+      services_extracted: 'bg-yellow-100 text-yellow-800',
+      checking_1c: 'bg-yellow-100 text-yellow-800',
+      creating_in_1c: 'bg-yellow-100 text-yellow-800',
       completed: 'bg-green-100 text-green-800',
+      validation_passed: 'bg-green-100 text-green-800',
+      validation_failed: 'bg-orange-100 text-orange-800',
       failed: 'bg-red-100 text-red-800',
       pending: 'bg-gray-100 text-gray-800',
     };
@@ -17,12 +38,22 @@ const TestFileList = ({ files, onProcessFile, onViewResults, onReprocessFile, pr
     const labels = {
       uploaded: 'Загружен',
       processing: 'Обрабатывается',
+      document_loaded: 'Документ загружен',
+      text_extracted: 'Текст извлечён',
+      data_extracted: 'Данные извлечены',
+      services_extracted: 'Услуги извлечены',
+      checking_1c: 'Проверка в 1С',
+      creating_in_1c: 'Создание в 1С',
       completed: 'Завершен',
+      validation_passed: 'Валидация пройдена',
+      validation_failed: 'Валидация не пройдена',
       failed: 'Ошибка',
       pending: 'Ожидает',
     };
     return labels[status] || status;
   };
+
+  const isProcessingStatus = (status) => processingStates.includes(status);
 
   const formatFileSize = (bytes) => {
     if (bytes === 0) return '0 Bytes';
@@ -94,10 +125,18 @@ const TestFileList = ({ files, onProcessFile, onViewResults, onReprocessFile, pr
                 </div>
               </div>
               <div className="flex items-center space-x-2 ml-4">
-                {isProcessing && (
+                {isProcessing && fileItem.contractId && isProcessingStatus(fileItem.status) && (
+                  <div className="w-48">
+                    <ProgressBar
+                      contractId={fileItem.contractId}
+                      initialStatus={fileItem.status}
+                    />
+                  </div>
+                )}
+                {isProcessing && (!fileItem.contractId || !isProcessingStatus(fileItem.status)) && (
                   <div className="flex items-center space-x-2">
                     <LoadingSpinner size="sm" />
-                    <span className="text-sm text-gray-600">Обработка...</span>
+                    <span className="text-sm text-gray-600">Загрузка...</span>
                   </div>
                 )}
                 {!isProcessing && canProcess && (

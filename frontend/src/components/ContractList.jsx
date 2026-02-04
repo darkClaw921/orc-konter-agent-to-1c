@@ -5,6 +5,7 @@ import { listContracts, getContractStatus, deleteContract, retryContract } from 
 import { setContracts, setFilter, updateContract, removeContract } from '../store/slices/contractSlice';
 import { addNotification } from '../store/slices/uiSlice';
 import LoadingSpinner from './LoadingSpinner';
+import ProgressBar from './ProgressBar';
 
 const ContractList = () => {
   const dispatch = useDispatch();
@@ -18,6 +19,7 @@ const ContractList = () => {
     document_loaded: 'Документ загружен',
     text_extracted: 'Текст извлечен',
     data_extracted: 'Данные извлечены',
+    services_extracted: 'Услуги извлечены',
     validation_passed: 'Валидация пройдена',
     validation_failed: 'Валидация не пройдена',
     checking_1c: 'Проверка в 1С',
@@ -26,6 +28,18 @@ const ContractList = () => {
     failed: 'Ошибка',
   };
 
+  // Статусы, при которых показываем прогресс-бар
+  const processingStates = [
+    'uploaded',
+    'processing',
+    'document_loaded',
+    'text_extracted',
+    'data_extracted',
+    'services_extracted',
+    'checking_1c',
+    'creating_in_1c',
+  ];
+
   const getStatusColor = (status) => {
     const colors = {
       uploaded: 'bg-gray-100 text-gray-800',
@@ -33,6 +47,7 @@ const ContractList = () => {
       document_loaded: 'bg-blue-100 text-blue-800',
       text_extracted: 'bg-blue-100 text-blue-800',
       data_extracted: 'bg-blue-100 text-blue-800',
+      services_extracted: 'bg-blue-100 text-blue-800',
       validation_passed: 'bg-green-100 text-green-800',
       validation_failed: 'bg-red-100 text-red-800',
       checking_1c: 'bg-yellow-100 text-yellow-800',
@@ -42,6 +57,8 @@ const ContractList = () => {
     };
     return colors[status] || 'bg-gray-100 text-gray-800';
   };
+
+  const isProcessingStatus = (status) => processingStates.includes(status);
 
   const loadContracts = async () => {
     try {
@@ -152,7 +169,7 @@ const ContractList = () => {
   const filteredContracts = contracts.filter((contract) => {
     if (filter === 'all') return true;
     if (filter === 'processing') {
-      return ['uploaded', 'processing', 'document_loaded', 'text_extracted', 'data_extracted', 'checking_1c', 'creating_in_1c'].includes(contract.status);
+      return processingStates.includes(contract.status);
     }
     if (filter === 'completed') {
       return contract.status === 'completed';
@@ -211,6 +228,9 @@ const ContractList = () => {
               <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                 Статус
               </th>
+              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider min-w-[200px]">
+                Прогресс
+              </th>
               <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                 Дата создания
               </th>
@@ -222,7 +242,7 @@ const ContractList = () => {
           <tbody className="bg-white divide-y divide-gray-200">
             {filteredContracts.length === 0 ? (
               <tr>
-                <td colSpan="6" className="px-6 py-8 text-center text-gray-500">
+                <td colSpan="7" className="px-6 py-8 text-center text-gray-500">
                   Контракты не найдены
                 </td>
               </tr>
@@ -256,6 +276,25 @@ const ContractList = () => {
                     >
                       {statusLabels[contract.status] || contract.status}
                     </span>
+                  </td>
+                  <td className="px-6 py-4">
+                    {isProcessingStatus(contract.status) ? (
+                      <ProgressBar
+                        contractId={contract.id}
+                        initialStatus={contract.status}
+                      />
+                    ) : contract.status === 'completed' ? (
+                      <div className="flex items-center space-x-2">
+                        <div className="flex-1 bg-gray-200 rounded-full h-2">
+                          <div className="bg-green-500 h-2 rounded-full" style={{ width: '100%' }} />
+                        </div>
+                        <span className="text-xs text-green-600 font-medium">100%</span>
+                      </div>
+                    ) : contract.status === 'failed' ? (
+                      <div className="text-xs text-red-500">Ошибка обработки</div>
+                    ) : (
+                      <div className="text-xs text-gray-400">-</div>
+                    )}
                   </td>
                   <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
                     {new Date(contract.created_at).toLocaleString('ru-RU')}

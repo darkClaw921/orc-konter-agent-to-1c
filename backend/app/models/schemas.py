@@ -138,3 +138,18 @@ class RefreshServicesResponse(BaseModel):
     services: Optional[List[dict]] = None
     error: Optional[str] = None
     message: str
+
+
+class ContractProgressResponse(BaseModel):
+    """Ответ с прогрессом обработки контракта"""
+    contract_id: int
+    stage: str
+    stage_name: str
+    stage_index: int
+    total_stages: int
+    stage_progress: int = Field(..., ge=0, le=100, description="Прогресс внутри стадии (0-100)")
+    stage_message: Optional[str] = None
+    overall_progress: int = Field(..., ge=0, le=100, description="Общий прогресс обработки (0-100)")
+    chunks_total: Optional[int] = None
+    chunks_processed: Optional[int] = None
+    updated_at: Optional[datetime] = None

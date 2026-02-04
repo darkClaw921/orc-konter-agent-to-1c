@@ -8,6 +8,20 @@ import LoadingSpinner from '../components/LoadingSpinner';
 
 const STORAGE_KEY = 'tests_page_files';
 
+// Статусы, при которых файл считается в обработке
+const PROCESSING_STATES = [
+  'uploaded',
+  'processing',
+  'document_loaded',
+  'text_extracted',
+  'data_extracted',
+  'services_extracted',
+  'checking_1c',
+  'creating_in_1c',
+];
+
+const isProcessingState = (status) => PROCESSING_STATES.includes(status);
+
 const TestsPage = () => {
   const dispatch = useDispatch();
   const fileInputRef = useRef(null);
@@ -105,7 +119,7 @@ const TestsPage = () => {
         setFiles(restoredFiles);
         // Проверяем, есть ли файлы в процессе обработки
         const processingIds = restoredFiles
-          .filter((f) => f.status === 'processing' || f.status === 'pending')
+          .filter((f) => isProcessingState(f.status) || f.status === 'pending')
           .map((f) => f.contractId)
           .filter(Boolean);
         if (processingIds.length > 0) {
@@ -316,7 +330,7 @@ const TestsPage = () => {
   useEffect(() => {
     if (!isLoadingFromStorage && files.length > 0) {
       files.forEach((file, index) => {
-        if ((file.status === 'processing' || file.status === 'pending') && file.contractId && !processingFiles.has(file.contractId)) {
+        if ((isProcessingState(file.status) || file.status === 'pending') && file.contractId && !processingFiles.has(file.contractId)) {
           setProcessingFiles((prev) => new Set(prev).add(file.contractId));
           setTimeout(() => {
             pollContractStatus(file.contractId, index);

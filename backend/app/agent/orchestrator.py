@@ -1,7 +1,6 @@
 """
 Оркестрация обработки контракта
 """
-import asyncio
 import json
 import traceback
 from datetime import datetime
@@ -12,27 +11,31 @@ from app.models.enums import ProcessingState, EventStatus, OneCStatus
 from app.models.database import ProcessingHistory, Counterparty1C, ContractData
 from app.services.document_processor import DocumentProcessor
 from app.services.llm_service import LLMService
+from app.services.progress_service import ProgressService
 from app.services.prompts import EXTRACT_CONTRACT_DATA_PROMPT, MERGE_CHUNKS_DATA_PROMPT
 from app.services.validation_service import ValidationService
 from app.utils.logging import get_logger
+from typing import Optional
 
 logger = get_logger(__name__)
 
 
 class AgentOrchestrator:
     """Главный оркестратор для обработки контрактов"""
-    
-    def __init__(self, 
+
+    def __init__(self,
                  state_manager: StateManager,
                  doc_processor: DocumentProcessor,
                  llm_service: LLMService,
                  validation_service: ValidationService,
-                 oneс_service=None):
+                 oneс_service=None,
+                 progress_service: Optional[ProgressService] = None):
         self.state_manager = state_manager
         self.doc_processor = doc_processor
         self.llm_service = llm_service
         self.validation_service = validation_service
         self.oneс_service = oneс_service
+        self.progress_service = progress_service
     
     async def process_contract(self, contract_id: int, document_path: str) -> AgentState:
         """
@@ -43,14 +46,17 @@ class AgentOrchestrator:
             status=ProcessingState.UPLOADED,
             document_path=document_path
         )
-        
+
         try:
+            # Инициализируем прогресс
+            await self._update_progress(contract_id, 'uploaded', 100, 'Файл загружен')
+
             # Шаг 1: Загрузить документ
             await self._load_document(state)
-            
+
             # Шаг 2: Извлечь текст
             await self._extract_text(state)
-            
+
             # Шаг 3: Извлечь данные контракта с помощью LLM
             await self._extract_contract_data(state)
 
@@ -59,17 +65,18 @@ class AgentOrchestrator:
 
             # Шаг 4: Валидировать извлеченные данные
             await self._validate_data(state)
-            
+
             # Шаг 5: Проверить наличие в 1С (если сервис доступен)
             if self.oneс_service:
                 await self._check_existing_in_1c(state)
-                
+
                 # Шаг 6: Создать контрагента в 1С
                 await self._create_counterparty_in_1c(state)
-            
+
             # Шаг 7: Завершить обработку
             state.status = ProcessingState.COMPLETED
-            
+            await self._update_progress(contract_id, 'completed', 100, 'Обработка завершена')
+
         except Exception as e:
             error_traceback = traceback.format_exc()
             logger.error("Contract processing failed", 
@@ -83,16 +90,49 @@ class AgentOrchestrator:
         
         finally:
             await self.state_manager.save_state(state)
-        
+            # Очищаем прогресс после завершения
+            if self.progress_service:
+                try:
+                    await self.progress_service.clear_progress(contract_id)
+                except Exception:
+                    pass
+
         return state
-    
+
+    async def _update_progress(
+        self,
+        contract_id: int,
+        stage: str,
+        stage_progress: int = 0,
+        message: Optional[str] = None,
+        chunks_total: Optional[int] = None,
+        chunks_processed: Optional[int] = None
+    ) -> None:
+        """Обновить прогресс обработки"""
+        if self.progress_service:
+            try:
+                await self.progress_service.update_progress(
+                    contract_id=contract_id,
+                    stage=stage,
+                    stage_progress=stage_progress,
+                    message=message,
+                    chunks_total=chunks_total,
+                    chunks_processed=chunks_processed
+                )
+            except Exception as e:
+                logger.warning("Failed to update progress",
+                             contract_id=contract_id,
+                             error=str(e))
+
     async def _load_document(self, state: AgentState):
         """Загрузить DOCX документ"""
         logger.info("Loading document", contract_id=state.contract_id)
-        
+        await self._update_progress(state.contract_id, 'document_loaded', 0, 'Загрузка документа...')
+
         if not self.doc_processor.load_document(state.document_path):
             raise Exception(f"Failed to load document: {state.document_path}")
-        
+
+        await self._update_progress(state.contract_id, 'document_loaded', 100, 'Документ загружен')
         await self.state_manager.update_status(
             state.contract_id,
             ProcessingState.DOCUMENT_LOADED
@@ -101,9 +141,11 @@ class AgentOrchestrator:
     async def _extract_text(self, state: AgentState):
         """Извлечь текст из документа"""
         logger.info("Extracting text", contract_id=state.contract_id)
-        
+        await self._update_progress(state.contract_id, 'text_extracted', 0, 'Извлечение текста...')
+
         state.raw_text = self.doc_processor.extract_text()
-        
+
+        await self._update_progress(state.contract_id, 'text_extracted', 100, 'Текст извлечён')
         await self.state_manager.update_status(
             state.contract_id,
             ProcessingState.TEXT_EXTRACTED,
@@ -352,6 +394,7 @@ class AgentOrchestrator:
     async def _extract_contract_data(self, state: AgentState):
         """Извлечь данные контракта с помощью LLM"""
         logger.info("Extracting contract data", contract_id=state.contract_id)
+        await self._update_progress(state.contract_id, 'data_extracted', 0, 'Начало извлечения данных...')
         
         # Инициализируем список запросов LLM если его еще нет
         if state.llm_requests is None:
@@ -418,12 +461,31 @@ class AgentOrchestrator:
                        document_size=document_size)
 
             chunks = self.doc_processor.get_chunks_for_llm()
+            total_chunks = len(chunks)
             logger.info("Document split into chunks",
                        contract_id=state.contract_id,
-                       chunks_count=len(chunks))
+                       chunks_count=total_chunks)
+
+            await self._update_progress(
+                state.contract_id, 'data_extracted', 0,
+                f'Извлечение данных: 0/{total_chunks} чанков',
+                chunks_total=total_chunks, chunks_processed=0
+            )
+
+            # Callback для обновления прогресса при обработке чанков
+            async def data_extraction_progress_callback(chunks_processed: int, chunks_total: int):
+                progress_percent = (chunks_processed * 100) // chunks_total if chunks_total > 0 else 0
+                await self._update_progress(
+                    state.contract_id, 'data_extracted', progress_percent,
+                    f'Извлечение данных: {chunks_processed}/{chunks_total} чанков',
+                    chunks_total=chunks_total, chunks_processed=chunks_processed
+                )
 
             # Обрабатываем все чанки ПАРАЛЛЕЛЬНО через LLM
-            parallel_results = await self.llm_service.extract_contract_data_parallel(chunks)
+            parallel_results = await self.llm_service.extract_contract_data_parallel(
+                chunks,
+                progress_callback=data_extraction_progress_callback
+            )
 
             # Собираем результаты
             chunks_data: List[Dict[str, Any]] = []
@@ -648,6 +710,7 @@ class AgentOrchestrator:
     async def _extract_all_services(self, state: AgentState):
         """Извлечь все услуги отдельным запросом к LLM (ПАРАЛЛЕЛЬНО)"""
         logger.info("Extracting all services separately (parallel)", contract_id=state.contract_id)
+        await self._update_progress(state.contract_id, 'services_extracted', 0, 'Начало извлечения услуг...')
 
         # Инициализируем список запросов LLM если его еще нет
         if state.llm_requests is None:
@@ -665,26 +728,52 @@ class AgentOrchestrator:
         else:
             chunks = self.doc_processor.get_chunks_for_llm()
 
+        total_chunks = len(chunks)
+
         # Информация о запросе для логирования
         request_info = {
             "request_type": "services_extraction_parallel",
-            "chunks_count": len(chunks),
+            "chunks_count": total_chunks,
             "timestamp": datetime.now().isoformat(),
         }
+
+        await self._update_progress(
+            state.contract_id, 'services_extracted', 0,
+            f'Извлечение услуг: 0/{total_chunks} чанков',
+            chunks_total=total_chunks, chunks_processed=0
+        )
+
+        # Callback для обновления прогресса при извлечении услуг
+        async def services_progress_callback(chunks_processed: int, chunks_total: int, _services_found: int):
+            progress_percent = (chunks_processed * 100) // chunks_total if chunks_total > 0 else 0
+            await self._update_progress(
+                state.contract_id, 'services_extracted', progress_percent,
+                f'Извлечение услуг: {chunks_processed}/{chunks_total} чанков',
+                chunks_total=chunks_total, chunks_processed=chunks_processed
+            )
 
         all_services = []
         try:
             # Извлекаем услуги параллельно из всех чанков
-            all_services = await self.llm_service.extract_services_from_chunks(chunks)
+            all_services = await self.llm_service.extract_services_from_chunks(
+                chunks,
+                progress_callback=services_progress_callback
+            )
             state.extracted_data['all_services'] = all_services
 
             request_info["status"] = "success"
             request_info["services_count"] = len(all_services)
 
+            await self._update_progress(
+                state.contract_id, 'services_extracted', 100,
+                f'Извлечено {len(all_services)} услуг',
+                chunks_total=total_chunks, chunks_processed=total_chunks
+            )
+
             logger.info("Services extracted successfully (parallel)",
                        contract_id=state.contract_id,
                        services_count=len(all_services),
-                       chunks_count=len(chunks))
+                       chunks_count=total_chunks)
         except Exception as e:
             error_traceback = traceback.format_exc()
             request_info["status"] = "error"
@@ -694,14 +783,15 @@ class AgentOrchestrator:
                        error=str(e),
                        error_type=type(e).__name__,
                        error_traceback=error_traceback,
-                       chunks_count=len(chunks) if 'chunks' in locals() else 0)
+                       chunks_count=total_chunks)
             state.extracted_data['all_services'] = []
         finally:
             state.llm_requests.append(request_info)
     async def _validate_data(self, state: AgentState):
         """Валидировать извлеченные данные"""
         logger.info("Validating extracted data", contract_id=state.contract_id)
-        
+        await self._update_progress(state.contract_id, 'validation_passed', 0, 'Валидация данных...')
+
         validation_result = self.validation_service.validate_contract_data(
             state.extracted_data
         )
@@ -721,14 +811,16 @@ class AgentOrchestrator:
                           errors=validation_result['errors'],
                           contract_id=state.contract_id)
         
+        await self._update_progress(state.contract_id, 'validation_passed', 100, 'Валидация завершена')
         await self.state_manager.update_status(
             state.contract_id,
             ProcessingState.VALIDATION_PASSED
         )
-    
+
     async def _check_existing_in_1c(self, state: AgentState):
         """Проверить наличие контрагента в справочнике 1С"""
         logger.info("Checking existing counterparty in 1C", contract_id=state.contract_id)
+        await self._update_progress(state.contract_id, 'checking_1c', 0, 'Проверка в 1С...')
         
         if not state.extracted_data:
             raise Exception("Extracted data not found")
@@ -828,7 +920,9 @@ class AgentOrchestrator:
                 logger.info("Counterparty already exists in 1C",
                            inn=inn,
                            entity_uuid=existing.get('uuid'))
-    
+
+        await self._update_progress(state.contract_id, 'checking_1c', 100, 'Проверка в 1С завершена')
+
     async def _create_counterparty_in_1c(self, state: AgentState):
         """
         Создать контрагента в 1С.
@@ -845,7 +939,8 @@ class AgentOrchestrator:
             return
         
         logger.info("Creating counterparty in 1C", contract_id=state.contract_id)
-        
+        await self._update_progress(state.contract_id, 'creating_in_1c', 0, 'Создание в 1С...')
+
         await self.state_manager.update_status(
             state.contract_id,
             ProcessingState.CREATING_IN_1C
@@ -994,12 +1089,15 @@ class AgentOrchestrator:
                         self.state_manager.db.rollback()
             
             state.created_counterparty_id = created_id
-            
+
             if created_id:
+                await self._update_progress(state.contract_id, 'creating_in_1c', 100, 'Контрагент создан в 1С')
                 logger.info("Counterparty created successfully",
                            contract_id=state.contract_id,
                            counterparty_id=created_id)
-    
+            else:
+                await self._update_progress(state.contract_id, 'creating_in_1c', 100, 'Создание в 1С завершено')
+
     def _prepare_counterparty_data(self, state: AgentState) -> Dict[str, Any]:
         """
         Подготовить данные контрагента для создания в 1С согласно правилам 2.1-2.8.

@@ -22,13 +22,15 @@ from app.models.schemas import (
     CreateIn1CResponse,
     AddNoteRequest,
     AddNoteResponse,
-    RefreshServicesResponse
+    RefreshServicesResponse,
+    ContractProgressResponse,
 )
 from app.services.document_validator import DocumentValidator
 from app.services.storage_service import StorageService
 from app.services.document_processor import DocumentProcessor
 from app.services.oneс_service import OneCService
 from app.services.llm_service import LLMService
+from app.services.progress_service import ProgressService
 from app.tasks.processing_tasks import process_contract_task
 from app.utils.logging import get_logger
 from app.utils.json_utils import convert_decimal_for_jsonb
@@ -154,6 +156,76 @@ async def get_contract_status(
         processing_completed_at=contract.processing_completed_at,
         error_message=contract.error_message
     )
+
+
+@router.get("/{contract_id}/progress", response_model=ContractProgressResponse)
+async def get_contract_progress(
+    contract_id: int,
+    current_user: dict = Depends(get_optional_current_user),
+    db: Session = Depends(get_db)
+):
+    """Получить прогресс обработки контракта"""
+
+    contract = db.query(Contract).filter(Contract.id == contract_id).first()
+    if not contract:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Contract not found"
+        )
+
+    # Получаем прогресс из Redis
+    progress_service = ProgressService()
+    try:
+        progress_data = await progress_service.get_progress(contract_id)
+
+        if progress_data:
+            return ContractProgressResponse(
+                contract_id=progress_data['contract_id'],
+                stage=progress_data['stage'],
+                stage_name=progress_data['stage_name'],
+                stage_index=progress_data['stage_index'],
+                total_stages=progress_data['total_stages'],
+                stage_progress=progress_data['stage_progress'],
+                stage_message=progress_data.get('stage_message'),
+                overall_progress=progress_data['overall_progress'],
+                chunks_total=progress_data.get('chunks_total'),
+                chunks_processed=progress_data.get('chunks_processed'),
+                updated_at=progress_data.get('updated_at')
+            )
+
+        # Если данных в Redis нет, формируем ответ на основе статуса из БД
+        stage = contract.status.value
+        stage_names = ProgressService.STAGE_NAMES
+        stage_order = ProgressService.STAGE_ORDER
+
+        stage_index = stage_order.index(stage) + 1 if stage in stage_order else 0
+
+        # Для завершённых или упавших контрактов показываем 100% или 0%
+        if stage == 'completed':
+            overall_progress = 100
+            stage_progress = 100
+        elif stage == 'failed':
+            overall_progress = 0
+            stage_progress = 0
+        else:
+            overall_progress = progress_service._calculate_overall_progress(stage, 100)
+            stage_progress = 100
+
+        return ContractProgressResponse(
+            contract_id=contract_id,
+            stage=stage,
+            stage_name=stage_names.get(stage, stage),
+            stage_index=stage_index,
+            total_stages=len(stage_order),
+            stage_progress=stage_progress,
+            stage_message=stage_names.get(stage, stage),
+            overall_progress=overall_progress,
+            chunks_total=None,
+            chunks_processed=None,
+            updated_at=contract.updated_at.isoformat() if contract.updated_at else None
+        )
+    finally:
+        await progress_service.close()
 
 
 @router.get("/{contract_id}/data", response_model=ContractDataResponse)

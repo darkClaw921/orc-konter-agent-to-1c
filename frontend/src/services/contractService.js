@@ -158,3 +158,13 @@ export const refreshServices = async (contractId) => {
   const response = await api.post(`/contracts/${contractId}/refresh-services`);
   return response.data;
 };
+
+/**
+ * Получить прогресс обработки контракта
+ * @param {number} contractId - ID контракта
+ * @returns {Promise} Прогресс обработки контракта
+ */
+export const getContractProgress = async (contractId) => {
+  const response = await api.get(`/contracts/${contractId}/progress`);
+  return response.data;
+};

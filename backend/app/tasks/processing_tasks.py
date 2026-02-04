@@ -14,6 +14,7 @@ from app.models.enums import ProcessingState, EventStatus
 from app.services.document_processor import DocumentProcessor
 from app.services.llm_service import LLMService
 from app.services.oneс_service import OneCService
+from app.services.progress_service import ProgressService
 from app.services.storage_service import StorageService
 from app.services.validation_service import ValidationService
 from app.tasks.celery_app import celery_app
@@ -56,14 +57,16 @@ def process_contract_task(self, contract_id: int, document_path: str):
         llm_service = LLMService()
         validation_service = ValidationService()
         oneс_service = OneCService()
-        
+        progress_service = ProgressService()
+
         # Создаем оркестратор
         orchestrator = AgentOrchestrator(
             state_manager=state_manager,
             doc_processor=doc_processor,
             llm_service=llm_service,
             validation_service=validation_service,
-            oneс_service=oneс_service
+            oneс_service=oneс_service,
+            progress_service=progress_service
         )
         
         # Запускаем обработку
@@ -153,8 +156,13 @@ def process_contract_task(self, contract_id: int, document_path: str):
                        status=state.status.value)
             
         finally:
+            # Закрываем progress_service
+            try:
+                loop.run_until_complete(progress_service.close())
+            except Exception:
+                pass
             loop.close()
-    
+
     except Exception as e:
         logger.error("Contract processing failed", 
                     contract_id=contract_id,

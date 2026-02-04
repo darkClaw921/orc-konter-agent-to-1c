@@ -6,7 +6,7 @@ import json
 import random
 import traceback
 from abc import ABC, abstractmethod
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Callable, Awaitable
 from datetime import datetime
 
 from openai import AsyncOpenAI
@@ -755,7 +755,7 @@ class LLMService:
         merged = chunks_data[0].copy()
         
         # Обрабатываем остальные чанки
-        for chunk_idx, chunk_data in enumerate(chunks_data[1:], start=1):
+        for _chunk_idx, chunk_data in enumerate(chunks_data[1:], start=1):
             if not chunk_data:
                 continue
             
@@ -831,7 +831,8 @@ class LLMService:
         self,
         chunk_idx: int,
         chunk_text: str,
-        retry_count: Optional[int] = None
+        retry_count: Optional[int] = None,
+        progress_callback: Optional[Callable[[int], Awaitable[None]]] = None
     ) -> tuple[int, List[Dict[str, Any]]]:
         """
         Извлечь услуги из одного чанка с повторами при ошибке (с семафором)
@@ -868,6 +869,14 @@ class LLMService:
                                attempt_duration_seconds=round(attempt_duration, 2),
                                total_duration_seconds=round(total_duration, 2),
                                chunk_size=len(chunk_text))
+
+                    # Вызываем callback с количеством найденных услуг
+                    if progress_callback:
+                        try:
+                            await progress_callback(len(chunk_services))
+                        except Exception as cb_error:
+                            logger.warning("Progress callback failed", error=str(cb_error))
+
                     return (chunk_idx, chunk_services)
 
                 except Exception as e:
@@ -927,13 +936,19 @@ class LLMService:
                        final_error=str(last_error) if last_error else "Unknown error")
             return (chunk_idx, [])
 
-    async def extract_services_from_chunks(self, chunks: List[str], retry_count: Optional[int] = None) -> List[Dict[str, Any]]:
+    async def extract_services_from_chunks(
+        self,
+        chunks: List[str],
+        retry_count: Optional[int] = None,
+        progress_callback: Optional[Callable[[int, int, int], Awaitable[None]]] = None
+    ) -> List[Dict[str, Any]]:
         """
         Извлечь услуги из всех чанков документа ПАРАЛЛЕЛЬНО с обработкой БАТЧАМИ
 
         Args:
             chunks: Список текстовых чанков документа
             retry_count: Количество попыток при ошибке (None = автоматически определяется по типу ошибки)
+            progress_callback: Callback для отслеживания прогресса (chunks_processed, chunks_total, services_found)
 
         Returns:
             Список услуг из всех чанков (без дубликатов)
@@ -951,6 +966,22 @@ class LLMService:
                    max_concurrent=self.MAX_CONCURRENT_REQUESTS)
 
         all_results = []
+
+        # Shared counters for tracking progress with lock
+        chunks_processed_count = 0
+        total_services_found = 0
+        counter_lock = asyncio.Lock()
+
+        async def chunk_completed_callback(services_count: int):
+            """Callback вызывается после успешной обработки каждого чанка"""
+            nonlocal chunks_processed_count, total_services_found
+            async with counter_lock:
+                chunks_processed_count += 1
+                total_services_found += services_count
+                current_count = chunks_processed_count
+                current_services = total_services_found
+            if progress_callback:
+                await progress_callback(current_count, total_chunks, current_services)
 
         # Обрабатываем чанки батчами
         for batch_num in range(total_batches):
@@ -970,7 +1001,8 @@ class LLMService:
                 self._extract_services_from_chunk_with_retry(
                     batch_start + chunk_idx + 1,  # Глобальный индекс чанка
                     chunk_text,
-                    retry_count
+                    retry_count,
+                    chunk_completed_callback
                 )
                 for chunk_idx, chunk_text in enumerate(batch_chunks)
             ]
@@ -988,7 +1020,7 @@ class LLMService:
         service_names_seen = set()
 
         # Сортируем по индексу чанка для сохранения порядка
-        for chunk_idx, chunk_services in sorted(all_results, key=lambda x: x[0]):
+        for _result_chunk_idx, chunk_services in sorted(all_results, key=lambda x: x[0]):
             for service in chunk_services:
                 name = service.get('name', '').lower().strip()
                 if name and name not in service_names_seen:
@@ -1015,7 +1047,8 @@ class LLMService:
         self,
         chunk_idx: int,
         chunk_text: str,
-        retry_count: Optional[int] = None
+        retry_count: Optional[int] = None,
+        progress_callback: Optional[Callable[[], Awaitable[None]]] = None
     ) -> tuple[int, Optional[Dict[str, Any]], Optional[str]]:
         """
         Извлечь данные контракта из одного чанка с повторами (с семафором)
@@ -1049,6 +1082,14 @@ class LLMService:
                                attempt_duration_seconds=round(attempt_duration, 2),
                                total_duration_seconds=round(total_duration, 2),
                                chunk_size=len(chunk_text))
+
+                    # Вызываем callback сразу после успешной обработки чанка
+                    if progress_callback:
+                        try:
+                            await progress_callback()
+                        except Exception as cb_error:
+                            logger.warning("Progress callback failed", error=str(cb_error))
+
                     return (chunk_idx, result, None)
 
                 except Exception as e:
@@ -1113,7 +1154,8 @@ class LLMService:
     async def extract_contract_data_parallel(
         self,
         chunks: List[str],
-        retry_count: Optional[int] = None
+        retry_count: Optional[int] = None,
+        progress_callback: Optional[Callable[[int, int], Awaitable[None]]] = None
     ) -> List[tuple[int, Optional[Dict[str, Any]], Optional[str]]]:
         """
         Извлечь данные контракта из всех чанков ПАРАЛЛЕЛЬНО с обработкой БАТЧАМИ
@@ -1121,6 +1163,7 @@ class LLMService:
         Args:
             chunks: Список текстовых чанков документа
             retry_count: Количество попыток при ошибке (None = автоматически определяется по типу ошибки)
+            progress_callback: Callback для отслеживания прогресса (chunks_processed, chunks_total)
 
         Returns:
             Список кортежей (индекс чанка, данные или None, ошибка или None)
@@ -1139,6 +1182,19 @@ class LLMService:
 
         all_results = []
 
+        # Shared counter for tracking processed chunks with lock
+        chunks_processed_count = 0
+        counter_lock = asyncio.Lock()
+
+        async def chunk_completed_callback():
+            """Callback вызывается после успешной обработки каждого чанка"""
+            nonlocal chunks_processed_count
+            async with counter_lock:
+                chunks_processed_count += 1
+                current_count = chunks_processed_count
+            if progress_callback:
+                await progress_callback(current_count, total_chunks)
+
         # Обрабатываем чанки батчами
         for batch_num in range(total_batches):
             batch_start = batch_num * self.BATCH_SIZE
@@ -1156,7 +1212,8 @@ class LLMService:
                 self._extract_contract_data_from_chunk_with_retry(
                     batch_start + chunk_idx + 1,  # Глобальный индекс чанка
                     chunk_text,
-                    retry_count
+                    retry_count,
+                    chunk_completed_callback
                 )
                 for chunk_idx, chunk_text in enumerate(batch_chunks)
             ]
