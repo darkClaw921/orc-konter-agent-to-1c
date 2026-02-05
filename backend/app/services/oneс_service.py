@@ -684,3 +684,82 @@ class OneCService:
                         error_type=type(e).__name__,
                         counterparty_uuid=counterparty_uuid)
             return None
+
+    async def get_note_by_counterparty_uuid(self, counterparty_uuid: str) -> Optional[Dict[str, Any]]:
+        """
+        Получить заметку контрагента по его UUID.
+
+        Запрашивает заметки из информационного регистра КонтактнаяИнформация
+        через MCP сервис.
+
+        Args:
+            counterparty_uuid: UUID контрагента в 1С
+
+        Returns:
+            Dict с результатом:
+                - found: True если заметки найдены
+                - notes: список заметок с полями uuid, text, comment
+                - count: количество найденных заметок
+            или None при ошибке
+        """
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"{self.mcp_service_url}/command",
+                    json={
+                        "command": "get_note",
+                        "params": {"counterparty_uuid": counterparty_uuid}
+                    },
+                    timeout=aiohttp.ClientTimeout(total=self.timeout)
+                ) as response:
+                    if response.status == 200:
+                        response_data = await response.json()
+                        if response_data.get("status") == "success":
+                            result = response_data.get("result", {})
+                            notes_count = result.get("count", 0)
+                            logger.info("Notes retrieved for counterparty",
+                                       counterparty_uuid=counterparty_uuid,
+                                       notes_count=notes_count)
+
+                            # Выводим текст заметок в лог
+                            if result.get("found") and result.get("notes"):
+                                for i, note in enumerate(result["notes"], 1):
+                                    logger.info(f"Note {i} text",
+                                               counterparty_uuid=counterparty_uuid,
+                                               note_text=note.get("text", "")[:500])
+
+                            return result
+                        else:
+                            error_msg = response_data.get("error", "Unknown error")
+                            logger.error("Failed to get notes for counterparty",
+                                       error=error_msg,
+                                       counterparty_uuid=counterparty_uuid)
+                            return {"_error": error_msg}
+                    else:
+                        error_text = await response.text()
+                        logger.error("Failed to get notes for counterparty",
+                                   status=response.status,
+                                   error=error_text,
+                                   counterparty_uuid=counterparty_uuid)
+                        return {"_error": f"HTTP {response.status}: {error_text}"}
+        except asyncio.TimeoutError:
+            error_msg = f"Timeout after {self.timeout} seconds"
+            logger.error("Failed to get notes for counterparty",
+                        error=error_msg,
+                        error_type="timeout",
+                        counterparty_uuid=counterparty_uuid)
+            return {"_error": error_msg}
+        except aiohttp.ClientError as e:
+            error_msg = f"HTTP client error: {type(e).__name__}: {str(e)}"
+            logger.error("Failed to get notes for counterparty",
+                        error=error_msg,
+                        error_type="client_error",
+                        counterparty_uuid=counterparty_uuid)
+            return {"_error": error_msg}
+        except Exception as e:
+            error_msg = str(e) if str(e) else f"Unknown error: {type(e).__name__}"
+            logger.error("Failed to get notes for counterparty",
+                        error=error_msg,
+                        error_type=type(e).__name__,
+                        counterparty_uuid=counterparty_uuid)
+            return {"_error": error_msg}

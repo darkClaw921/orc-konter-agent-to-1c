@@ -109,7 +109,7 @@ IMPORTANT INSTRUCTIONS:
 - If information about a counterparty is not found, set that counterparty object to null
 - Ensure all JSON is valid
 - Return ONLY valid JSON, no additional text
-- Structure counterparties as objects with fields: inn, kpp, full_name, short_name, organizational_form, legal_entity_type
+- Structure counterparties as objects with fields: inn, kpp, full_name, short_name, organizational_form, legal_entity_type, service_start_date, service_end_date
 
 CRITICAL: CONTACT INFORMATION EXTRACTION:
 - Extract ALL responsible persons (agents) mentioned in the document, even if they appear in different sections
@@ -194,7 +194,7 @@ INSTRUCTIONS FOR MERGING:
 3. **Contract Information:**
    - contract_name, contract_number, contract_date: use the value that appears in the most authoritative context (usually header or first page)
    - contract_price: if different values appear, prefer the one from the main contract section (not from amendments or appendices)
-   - If dates differ, prefer the earliest date for contract_date
+   - If dates differ, prefer the earliest date for contract_date, service_start_date, service_end_date
 
 4. **VAT Information:**
    - vat_percent: if different percentages appear, use the one from the main contract section

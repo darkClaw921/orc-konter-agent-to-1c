@@ -113,7 +113,13 @@ class MCPServer:
         elif command == 'add_agreement':
             # add_agreement теперь использует _create_agreement с полной логикой правил 2.10
             return await self._create_agreement(params)
-        
+
+        elif command == 'get_note':
+            return await self._get_note(params)
+
+        elif command == 'update_note':
+            return await self._update_note(params)
+
         else:
             raise ValueError(f"Unknown command: {command}")
     
@@ -1209,40 +1215,87 @@ class MCPServer:
                         error=str(e),
                         counterparty_uuid=counterparty_uuid)
             raise ValueError(f"Failed to verify counterparty: {str(e)}")
-        
-        # Создаем запись заметки
+
+        # UUID вида контактной информации "Заметка"
+        NOTE_KIND_UUID = '0b03b064-f020-11e1-b31d-00138fb561aa'
+
+        # Сначала проверяем, есть ли уже заметка у этого контрагента
         comment = params.get('comment')
         note_result = None
         note_error = None
-        note_already_exists = False
+        note_updated = False
 
         try:
-            note_result = await self._create_contact_info_record(
-                counterparty_uuid=counterparty_uuid,
-                contact_type_uuid='0b03b064-f020-11e1-b31d-00138fb561aa',  # UUID вида "Заметка"
-                representation=note_text,
-                comment=comment,
-                note_type='Другое'  # Тип заметки согласно документации
-            )
+            # Получаем существующие заметки контрагента
+            existing_notes = await self._get_note({'counterparty_uuid': counterparty_uuid})
 
-            logger.info("Note added successfully to counterparty",
-                      counterparty_uuid=counterparty_uuid,
-                      note_uuid=note_result.get('uuid'))
+            if existing_notes.get('found') and existing_notes.get('notes'):
+                # Заметка уже существует - нужно добавить новый текст в начало и обновить
+                existing_note = existing_notes['notes'][0]  # Берем первую заметку
+                existing_text = existing_note.get('text', '')
+                existing_comment = existing_note.get('comment', '')
+                kind_uuid = existing_note.get('kind_uuid') or NOTE_KIND_UUID
+
+                # Формируем новый текст: новый текст + разделитель + старый текст
+                separator = "\n\n" + "=" * 50 + "\n\n"
+                new_combined_text = note_text + separator + existing_text if existing_text else note_text
+
+                # Комментарий: новый комментарий + разделитель + старый комментарий (если есть)
+                if comment:
+                    new_combined_comment = comment + separator + existing_comment if existing_comment else comment
+                else:
+                    new_combined_comment = existing_comment
+
+                logger.info("Updating existing note for counterparty",
+                           counterparty_uuid=counterparty_uuid,
+                           existing_text_length=len(existing_text),
+                           new_text_length=len(note_text))
+
+                # Получаем тип заметки из существующей записи
+                existing_note_type = existing_note.get('type') or 'Другое'
+
+                # Обновляем заметку
+                update_result = await self._update_note({
+                    'counterparty_uuid': counterparty_uuid,
+                    'kind_uuid': kind_uuid,
+                    'new_text': new_combined_text,
+                    'new_comment': new_combined_comment,
+                    'note_type': existing_note_type
+                })
+
+                note_result = {
+                    'created': False,
+                    'updated': True,
+                    'entity': update_result.get('entity')
+                }
+                note_updated = True
+
+                logger.info("Note updated successfully for counterparty",
+                           counterparty_uuid=counterparty_uuid)
+
+            else:
+                # Заметки нет - создаем новую
+                logger.info("No existing note found, creating new note for counterparty",
+                           counterparty_uuid=counterparty_uuid)
+
+                note_result = await self._create_contact_info_record(
+                    counterparty_uuid=counterparty_uuid,
+                    contact_type_uuid=NOTE_KIND_UUID,
+                    representation=note_text,
+                    comment=comment,
+                    note_type='Другое'  # Тип заметки согласно документации
+                )
+
+                logger.info("Note added successfully to counterparty",
+                           counterparty_uuid=counterparty_uuid)
 
         except Exception as e:
             note_error = str(e)
-            # Проверяем, является ли ошибка дубликатом записи
-            if 'уже существует' in note_error.lower() or 'already exists' in note_error.lower():
-                note_already_exists = True
-                logger.warning("Note already exists for counterparty, skipping note creation but will create agreement",
-                             counterparty_uuid=counterparty_uuid,
-                             error=note_error)
-            else:
-                logger.error("Failed to add note to counterparty",
-                            error=note_error,
-                            counterparty_uuid=counterparty_uuid,
-                            exc_info=True)
-                raise
+            logger.error("Failed to add/update note for counterparty",
+                        error=note_error,
+                        counterparty_uuid=counterparty_uuid,
+                        exc_info=True)
+            raise
 
         # Создаем договор независимо от результата создания заметки
         create_agreement = params.get('create_agreement', True)
@@ -1304,10 +1357,9 @@ class MCPServer:
 
         # Формируем результат
         result = {
-            'created': note_result is not None or note_already_exists,
-            'uuid': note_result.get('uuid') if note_result else None,
-            'entity': note_result.get('entity') if note_result else None,
-            'note_already_exists': note_already_exists
+            'created': note_result is not None and not note_updated,
+            'updated': note_updated,
+            'entity': note_result.get('entity') if note_result else None
         }
 
         # Добавляем информацию о договоре, если он был создан
@@ -1318,7 +1370,7 @@ class MCPServer:
         if agreement_error:
             result['agreement_error'] = agreement_error
 
-        if note_error and not note_already_exists:
+        if note_error:
             result['note_error'] = note_error
 
         return result
@@ -1672,19 +1724,22 @@ class MCPServer:
         - 2.10.6: Контролировать сумму задолженности с расчетом допустимой суммы
         - 2.10.7: Контролировать число дней задолженности
         """
-        logger.info("Create agreement3", params=params)
+        params_copy=params.copy()
+        params_copy.pop('raw_text')
+        logger.info("Create agreement3", params=params_copy)
         if not self.oneс_client:
             raise RuntimeError("1C client not initialized")
         
         counterparty_uuid = params.get('counterparty_uuid')
         if not counterparty_uuid:
             raise ValueError("counterparty_uuid is required")
-        
+        if params.get('contract') is not None:
+            params = params.get('contract')
         # Получаем данные контракта
         contract_name = params.get('contract_name') or params.get('name') or ''
         contract_number = params.get('contract_number')
-        contract_date = params.get('contract_date')
-        contract_price = params.get('contract_price') or params.get('price')
+        contract_date = params.get('contract_date') or params.get('date')
+        contract_price = params.get('contract_price') or params.get('price') or params.get('max_price')
         service_start_date = params.get('service_start_date') or params.get('service_period_start')
         service_end_date = params.get('service_end_date') or params.get('service_period_end')
         payment_terms = params.get('payment_terms')
@@ -1949,11 +2004,12 @@ class MCPServer:
                 'СрокДействия': params.get('service_end_date') or params.get('service_period_end'),
                 'ЦенаДоговора': params.get('price', 0) or params.get('contract_price', 0),
                 # 'ДопустимоеЧислоДнейЗадолженности': '',
-                'ДопустимаяСуммаЗадолженности': round(float(params.get('allowed_debt_amount', allowed_debt_amount)), 1),
+                'ДопустимаяСуммаЗадолженности': round(float(params.get('allowed_debt_amount') or allowed_debt_amount or 0), 1),
                 # 'ДопустимоеЧислоДнейЗадолженности': str(params.get('allowed_debt_days', 0)),
                 # 'ДопустимоеЧислоДнейЗадолженности': '5.0', # TODO не работает с любым типом данных
                 
             }
+            logger.info("params create agreement", params=params)
             
             # Добавляем обязательное поле Организация_Key если оно было получено
             if organization_uuid:
@@ -2156,6 +2212,265 @@ class MCPServer:
             }
         return {'found': False, 'message': 'No counterparties found in 1C'}
 
+    async def _get_note(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Получить заметку контрагента по его UUID из информационного регистра КонтактнаяИнформация.
+
+        ВАЖНО: 1С не разрешает фильтрацию по полю "Объект" в OData запросах,
+        поэтому получаем все записи и фильтруем локально.
+
+        Args:
+            params: Параметры команды
+                - counterparty_uuid (обязательный): UUID контрагента
+
+        Returns:
+            Dict с результатом:
+                - found: True если заметка найдена
+                - notes: список заметок с полями text (Представление), comment (Комментарий),
+                         object_uuid, kind_uuid (для составного ключа регистра)
+                - count: количество найденных заметок
+        """
+        counterparty_uuid = params.get('counterparty_uuid')
+        if not counterparty_uuid:
+            raise ValueError("counterparty_uuid is required")
+
+        if not self.oneс_client:
+            raise RuntimeError("1C client not initialized")
+
+        # Нормализуем UUID для сравнения (приводим к нижнему регистру)
+        counterparty_uuid_lower = counterparty_uuid.lower()
+
+        logger.info("Getting notes for counterparty", counterparty_uuid=counterparty_uuid)
+
+        # ВАЖНО: 1С не разрешает фильтрацию по полю "Объект" в OData запросах
+        # (ошибка "Операция не разрешена в предложении ГДЕ")
+        # Поэтому получаем записи с фильтром только по типу и ищем локально
+        try:
+            # Пробуем сначала отфильтровать по типу "Другое" (заметки)
+            all_records = []
+            skip = 0
+            top = 1000
+
+            while True:
+                try:
+                    # Пробуем фильтр по типу
+                    result = await self.oneс_client.query_data(
+                        'InformationRegister_КонтактнаяИнформация',
+                        filter_expr="Тип eq 'Другое'",
+                        skip=skip,
+                        top=top
+                    )
+                except Exception:
+                    # Если фильтр по типу тоже не работает - получаем все записи
+                    logger.warning("Filter by type not allowed, fetching all records")
+                    result = await self.oneс_client.query_data(
+                        'InformationRegister_КонтактнаяИнформация',
+                        skip=skip,
+                        top=top
+                    )
+
+                if not result or 'value' not in result:
+                    break
+
+                records = result.get('value', [])
+                if not records:
+                    break
+
+                all_records.extend(records)
+                skip += top
+
+                # Если получили меньше записей чем запрашивали - это последняя страница
+                if len(records) < top:
+                    break
+
+            logger.info("Total contact info records fetched", count=len(all_records))
+
+            # Фильтруем локально по UUID контрагента и типу "Другое"
+            notes = []
+            for item in all_records:
+                # Получаем UUID объекта из записи
+                item_object_uuid = item.get('Объект') or item.get('Объект_Key') or ''
+                item_object_uuid_lower = item_object_uuid.lower()
+
+                # Проверяем соответствие UUID контрагента
+                if counterparty_uuid_lower in item_object_uuid_lower or item_object_uuid_lower == counterparty_uuid_lower:
+                    # Проверяем тип (если не фильтровали ранее)
+                    item_type = item.get('Тип', '')
+                    if item_type == 'Другое' or not item_type:  # "Другое" - это заметки
+                        # Для информационного регистра используем составной ключ (Объект + Вид)
+                        note_data = {
+                            'text': item.get('Представление', ''),
+                            'comment': item.get('Комментарий', ''),
+                            'type': item_type,
+                            'counterparty_uuid': counterparty_uuid,
+                            # Данные для идентификации записи в регистре (составной ключ)
+                            'object_uuid': item.get('Объект') or item.get('Объект_Key'),
+                            'kind_uuid': item.get('Вид') or item.get('Вид_Key'),
+                            # Полная запись для возможного обновления
+                            'raw_record': item
+                        }
+                        notes.append(note_data)
+
+            logger.info("Notes retrieved for counterparty",
+                       counterparty_uuid=counterparty_uuid,
+                       notes_count=len(notes))
+
+            return {
+                'found': len(notes) > 0,
+                'notes': notes,
+                'count': len(notes)
+            }
+
+        except Exception as e:
+            logger.error("Failed to get notes for counterparty",
+                        error=str(e),
+                        counterparty_uuid=counterparty_uuid)
+            raise
+
+    async def _update_note(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Обновить заметку контрагента в информационном регистре КонтактнаяИнформация.
+
+        Для информационных регистров в 1С OData используем DELETE + POST
+        (замена записи), так как PATCH может не поддерживаться.
+
+        Args:
+            params: Параметры команды
+                - counterparty_uuid (обязательный): UUID контрагента (Объект)
+                - kind_uuid (обязательный): UUID вида контактной информации (Вид)
+                - new_text (обязательный): Новый текст заметки
+                - new_comment (опциональный): Новый комментарий
+
+        Returns:
+            Dict с результатом обновления
+        """
+        counterparty_uuid = params.get('counterparty_uuid')
+        kind_uuid = params.get('kind_uuid')
+        new_text = params.get('new_text')
+        new_comment = params.get('new_comment')
+
+        if not counterparty_uuid:
+            raise ValueError("counterparty_uuid is required")
+        if not kind_uuid:
+            raise ValueError("kind_uuid is required")
+        if not new_text:
+            raise ValueError("new_text is required")
+
+        if not self.oneс_client:
+            raise RuntimeError("1C client not initialized")
+
+        logger.info("Updating note for counterparty",
+                   counterparty_uuid=counterparty_uuid,
+                   kind_uuid=kind_uuid)
+
+        # Получаем тип из параметров (по умолчанию "Другое" для заметок)
+        note_type = params.get('note_type', 'Другое')
+
+        try:
+            # Для информационных регистров в 1С OData:
+            # Формат составного ключа ДОЛЖЕН включать типы для всех измерений
+            # и ВСЕ измерения регистра (Объект, Вид, Тип)
+            object_type = 'StandardODATA.Catalog_Контрагенты'
+            kind_type = 'StandardODATA.Catalog_ВидыКонтактнойИнформации'
+
+            # Формируем составной ключ с типами + Тип (измерение регистра)
+            register_key = (
+                f"InformationRegister_КонтактнаяИнформация("
+                f"Объект='{counterparty_uuid}',"
+                f"Объект_Type='{object_type}',"
+                f"Вид='{kind_uuid}',"
+                f"Вид_Type='{kind_type}',"
+                f"Тип='{note_type}')"
+            )
+
+            logger.info("Using register key for update", register_key=register_key)
+
+            update_data = {
+                'Представление': new_text
+            }
+            if new_comment:
+                update_data['Комментарий'] = new_comment
+
+            # Пробуем обновить через PATCH
+            try:
+                url = f"{self.oneс_client.base_url}/{register_key}"
+                headers = {
+                    'Content-Type': 'application/json',
+                    'Accept': 'application/json'
+                }
+                if self.oneс_client.auth_header:
+                    headers['Authorization'] = self.oneс_client.auth_header
+
+                async with self.oneс_client.session.patch(url, json=update_data, headers=headers) as response:
+                    if response.status in [200, 204]:
+                        logger.info("Note updated successfully via PATCH",
+                                   counterparty_uuid=counterparty_uuid)
+                        return {
+                            'updated': True,
+                            'method': 'PATCH',
+                            'counterparty_uuid': counterparty_uuid
+                        }
+                    else:
+                        error_text = await response.text()
+                        logger.warning("PATCH failed, will try DELETE+POST",
+                                      status=response.status,
+                                      error=error_text)
+            except Exception as e:
+                logger.warning("PATCH failed, will try DELETE+POST", error=str(e))
+
+            # Если PATCH не работает - используем DELETE + POST
+            # Сначала удаляем старую запись
+            delete_success = False
+            try:
+                url = f"{self.oneс_client.base_url}/{register_key}"
+                headers = {
+                    'Accept': 'application/json'
+                }
+                if self.oneс_client.auth_header:
+                    headers['Authorization'] = self.oneс_client.auth_header
+
+                async with self.oneс_client.session.delete(url, headers=headers) as response:
+                    if response.status in [200, 204]:
+                        delete_success = True
+                        logger.info("DELETE successful",
+                                   counterparty_uuid=counterparty_uuid)
+                    else:
+                        error_text = await response.text()
+                        logger.warning("DELETE failed",
+                                      status=response.status,
+                                      error=error_text)
+            except Exception as e:
+                logger.warning("DELETE failed", error=str(e))
+
+            # Если DELETE не сработал - ошибка
+            if not delete_success:
+                raise RuntimeError("Cannot update note: DELETE operation failed. The record cannot be modified via OData.")
+
+            # Создаем новую запись с обновленными данными
+            note_result = await self._create_contact_info_record(
+                counterparty_uuid=counterparty_uuid,
+                contact_type_uuid=kind_uuid,
+                representation=new_text,
+                comment=new_comment,
+                note_type='Другое'
+            )
+
+            logger.info("Note updated successfully via DELETE+POST",
+                       counterparty_uuid=counterparty_uuid)
+
+            return {
+                'updated': True,
+                'method': 'DELETE+POST',
+                'counterparty_uuid': counterparty_uuid,
+                'entity': note_result.get('entity')
+            }
+
+        except Exception as e:
+            logger.error("Failed to update note for counterparty",
+                        error=str(e),
+                        counterparty_uuid=counterparty_uuid)
+            raise
+
 
 if __name__ == '__main__':
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -2298,12 +2613,144 @@ if __name__ == '__main__':
   "service_goods_description": "оказание услуг, направленных на выполнение функций учреждения (ремонт и профилактическое обслуживание печатно-копировальной техники), доставка печатно-копировальной техники в сервисный центр Исполнителя для ремонта и возврат после ремонта.",
   "raw_text": None,
 }
-  
+        params2={
+  "event": "Create agreement3",
+  "timestamp": "2026-02-05T11:07:15.896774Z",
+  "level": "info",
+  "contract": {
+    "name": "КОНТРАКТ",
+    "number": "0179",
+    "date": "2025-01-01",
+    "price": 99980.0,
+    "vat_percent": None,
+    "vat_type": None,
+    "total_services": 35,
+    "customer": {
+      "inn": "7811034620",
+      "kpp": "781101001",
+      "full_name": "СПб ГБПОУ «АМК»",
+      "short_name": "АМК",
+      "organizational_form": "Государственное бюджетное профессиональное образовательное учреждение",
+      "legal_entity_type": "Юридическое лицо"
+    },
+    "contractor": {
+      "inn": "320109552683",
+      "kpp": None,
+      "full_name": "ИП Буров Андрей Геннадьевич",
+      "short_name": "ИП Буров А.Г.",
+      "organizational_form": "Индивидуальный предприниматель",
+      "legal_entity_type": "Физическое лицо"
+    },
+    "counterparty": {
+      "uuid": "e6734bb1-0222-11f1-9d06-7085c2496eb6",
+      "inn": "7811034620",
+      "kpp": "781101001",
+      "full_name": "СПб ГБПОУ «АМК»",
+      "short_name": "АМК",
+      "legal_entity_type": "Юридическое лицо",
+      "organizational_form": "Государственное бюджетное профессиональное образовательное учреждение",
+      "is_supplier": False,
+      "is_buyer": False,
+      "locations": [
+        {
+          "address": "ул. Бабушкина, д.119, литер А",
+          "responsible_person": None,
+          "directions": None
+        }
+      ]
+    },
+    "responsible_persons": [
+      {
+        "name": "Е.В. Платонова",
+        "phone": "362-32-15",
+        "email": "info@academykotin.ru",
+        "position": "Директор"
+      },
+      {
+        "name": "Андрей Геннадьевич Буров",
+        "phone": "+79118608650",
+        "email": "clatgor@gmail.com",
+        "position": "Индивидуальный предприниматель"
+      }
+    ],
+    "payment_terms": "Оплата производится Заказчиком по факту оказанных услуг, в течении 7 (семи) рабочих дней с момента подписания Сторонами документа о приемке, после предоставления Исполнителем счет-фактуры (при наличии), путем перечисления денежных средств на расчетный счет Исполнителя.",
+    "acceptance_procedure": "Приемка услуг производится в соответствии с требованиями, установленными настоящим Контрактом и Техническим заданием (Приложение № 1).",
+    "allowed_debt_days": 7,
+    "services_summary": {
+      "total_count": 35,
+      "total_price": 99980.0,
+      "types": [
+        {
+          "name": "Восстановление термоблока (Fuser Block Restoration)",
+          "count": 11,
+          "unit_price": 3249.35,
+          "subtotal": 35742.85
+        },
+        {
+          "name": "Замена комплекта роликов лотка (Tray Roller Kit Replacement)",
+          "count": 14,
+          "unit_price_range": [1732.99, 1766.31],
+          "subtotal": 24412.86
+        },
+        {
+          "name": "Замена комплекта роликов ADF (ADF Roller Kit Replacement)",
+          "count": 6,
+          "unit_price": 3066.05,
+          "subtotal": 18396.30
+        },
+        {
+          "name": "Замена платы форматора / лазерного блока / блока питания (Formatter/Laser/Feeder Board Replacement)",
+          "count": 3,
+          "unit_price_range": [12564.14, 6598.68, 2749.45],
+          "subtotal": 21912.27
+        },
+        {
+          "name": "Замена/Ремонт узла подачи роликов лотка (Feeder Roller Replacement/Repair)",
+          "count": 6,
+          "unit_price_range": [1699.66, 1999.6, 1932.95],
+          "subtotal": 11630.37
+        },
+        {
+          "name": "Ремонт принтера / узла подачи бумaги (Printer Repair)",
+          "count": 2,
+          "unit_price_range": [0.0, 1932.95],
+          "subtotal": 1932.95
+        }
+      ]
+    },
+    "full_services": [
+      {
+        "name": "Ремонт принтеров",
+        "quantity": None,
+        "unit": "рабочие дни",
+        "unit_price": None,
+        "total_price": 0.0,
+        "description": "Максимальный срок выполнения"
+      },
+      {
+        "name": "Замена платы форматора Kyocera M2135dn инв№101340300052",
+        "quantity": 1.0,
+        "unit": "шт.",
+        "unit_price": 12564.14,
+        "total_price": 12564.14,
+        "description": None
+      }
+    ]
+  }
+}
+
         # result = await server._create_counterparty(params)
         # print(result)
         # params['counterparty_uuid'] = result.get('uuid')
-        params['counterparty_uuid'] = 'e6734bb1-0222-11f1-9d06-7085c2496eb6'
-        result2 = await server._create_agreement(params)
+        params2['counterparty_uuid'] = 'e6734bb1-0222-11f1-9d06-7085c2496eb6'
+        params2['raw_text'] = 'e6734bb1-0222-11f1-9d06-7085c2496eb6'
+        result2 = await server._create_agreement(params2)
         print(result2)
+        
+        # result2 = await server._get_note(params)
+        # print(result2)
+        # params['note_text'] = 'test'
+        # result2 = await server._add_note(params)
+        # print(result2)
 
     asyncio.run(main2())
