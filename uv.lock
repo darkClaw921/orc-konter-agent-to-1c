@@ -1339,6 +1339,7 @@ dependencies = [
     { name = "psycopg2-binary" },
     { name = "python-docx" },
     { name = "python-json-logger" },
+    { name = "redis" },
     { name = "sqlalchemy" },
     { name = "structlog" },
 ]
@@ -1353,6 +1354,7 @@ requires-dist = [
     { name = "psycopg2-binary", specifier = ">=2.9.11" },
     { name = "python-docx", specifier = "==1.1.2" },
     { name = "python-json-logger", specifier = "==2.0.7" },
+    { name = "redis", specifier = ">=7.1.0" },
     { name = "sqlalchemy", specifier = ">=2.0.46" },
     { name = "structlog", specifier = "==23.2.0" },
 ]
@@ -1972,6 +1974,15 @@ dependencies = [
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/e0/fd/0d025466f0f84552634f2a94c018df34568fe55cc97184a6bb2c719c5b3a/rapidocr-3.6.0-py3-none-any.whl", hash = "sha256:d16b43872fc4dfa1e60996334dcd0dc3e3f1f64161e2332bc1873b9f65754e6b", size = 15067340 },
+]
+
+[[package]]
+name = "redis"
+version = "7.1.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/43/c8/983d5c6579a411d8a99bc5823cc5712768859b5ce2c8afe1a65b37832c81/redis-7.1.0.tar.gz", hash = "sha256:b1cc3cfa5a2cb9c2ab3ba700864fb0ad75617b41f01352ce5779dabf6d5f9c3c", size = 4796669 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/89/f0/8956f8a86b20d7bb9d6ac0187cf4cd54d8065bc9a1a09eb8011d4d326596/redis-7.1.0-py3-none-any.whl", hash = "sha256:23c52b208f92b56103e17c5d06bdc1a6c2c0b3106583985a76a18f83b265de2b", size = 354159 },
 ]
 
 [[package]]

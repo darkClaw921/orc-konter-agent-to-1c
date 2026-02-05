@@ -54,8 +54,20 @@ ADDITIONAL FIELDS (fill if present):
     - Extract ALL email addresses mentioned in the document
     - Extract postal addresses, legal addresses, and service addresses
     - Look in sections: "Реквизиты", "Контактная информация", "Адреса и телефоны"
-19. Payment Terms (Условия оплаты)
-20. Acceptance Procedure (Порядок приема-сдачи)
+19. Payment Terms (Условия оплаты) - full text of payment conditions
+20. Payment Deferral Days (Дни отсрочки платежа) - INTEGER number of CALENDAR days for payment deferral
+    - CRITICAL: Extract the NUMBER OF DAYS from payment terms text
+    - Convert words to numbers: "семи" = 7, "десяти" = 10, "пятнадцати" = 15, "тридцати" = 30
+    - Look for patterns: "в срок не более X дней", "в течение X дней", "X календарных/рабочих дней"
+    - If text says "рабочих дней" (business days), still extract the number as-is
+    - Examples:
+      * "в срок не более семи рабочих дней" → payment_deferral_days: 7
+      * "в течение 10 банковских дней" → payment_deferral_days: 10
+      * "оплата в течение 30 календарных дней" → payment_deferral_days: 30
+      * "в пятидневный срок" → payment_deferral_days: 5
+    - If multiple payment periods exist, use the main one (for final payment, not advance)
+    - Return null only if no payment deferral period is mentioned
+21. Acceptance Procedure (Порядок приема-сдачи)
 21. Specification Exists (Наличие спецификации) - true/false
 22. Pricing Method (Порядок ценообразования)
 23. Reporting Forms (Формы отчетности)
@@ -216,6 +228,7 @@ INSTRUCTIONS FOR MERGING:
    - service_description: combine text from all chunks, removing duplicates
    - service_start_date, service_end_date: use dates from the main contract section
    - payment_terms, acceptance_procedure: prefer more detailed descriptions
+   - payment_deferral_days: use the value found in chunks, prefer main payment section (not advance payments)
    - For any field: if one chunk has a value and another has null, use the non-null value
    - If multiple non-null values exist, prefer the more complete/detailed one
    - CRITICAL: If a field is null in ALL chunks, it must remain null in final result. DO NOT invent values

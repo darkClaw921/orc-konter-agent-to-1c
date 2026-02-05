@@ -753,6 +753,7 @@ async def create_counterparty_in_1c(
                 'customer': llm_data.get('customer'),
                 'contractor': llm_data.get('contractor'),
                 'payment_terms': llm_data.get('payment_terms'),
+                'payment_deferral_days': llm_data.get('payment_deferral_days'),
                 'acceptance_procedure': llm_data.get('acceptance_procedure'),
                 'specification_exists': llm_data.get('specification_exists'),
                 'pricing_method': llm_data.get('pricing_method'),
@@ -791,12 +792,17 @@ async def create_counterparty_in_1c(
                 if not contract_data_dict.get('service_end_date') and contract_data_db.service_end_date:
                     contract_data_dict['service_end_date'] = contract_data_db.service_end_date.isoformat()
 
+                if contract_data_dict.get('payment_deferral_days') is None and contract_data_db.payment_deferral_days:
+                    contract_data_dict['payment_deferral_days'] = contract_data_db.payment_deferral_days
+                    logger.info("Loaded payment_deferral_days from database", contract_id=contract_id, days=contract_data_db.payment_deferral_days)
+
             logger.info("Using contract data from LLM response",
                        contract_id=contract_id,
                        has_inn=bool(contract_data_dict.get('inn')),
                        has_all_services=bool(contract_data_dict.get('all_services')),
                        contract_number=contract_data_dict.get('contract_number'),
                        contract_date=contract_data_dict.get('contract_date'),
+                       payment_deferral_days=contract_data_dict.get('payment_deferral_days'),
                        role=role,
                        counterparty_source='customer' if llm_data.get('customer') else 'root')
         else:

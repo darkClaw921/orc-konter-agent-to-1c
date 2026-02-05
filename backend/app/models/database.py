@@ -111,6 +111,7 @@ class ContractData(Base):
     customer = Column(JSONB)  # информация о заказчике (Покупателе): inn, kpp, full_name, short_name, organizational_form, legal_entity_type
     contractor = Column(JSONB)  # информация об исполнителе (Поставщике): inn, kpp, full_name, short_name, organizational_form, legal_entity_type
     payment_terms = Column(Text)
+    payment_deferral_days = Column(Integer)  # количество календарных дней отсрочки платежа
     specification_exists = Column(Boolean)
     pricing_method = Column(Text)
     acceptance_procedure = Column(Text)
@@ -178,17 +179,18 @@ class ValidationResult(Base):
 class Counterparty1C(Base):
     """Модель для хранения информации о 1С интеграции"""
     __tablename__ = "counterparty_1c"
-    
+
     id = Column(Integer, primary_key=True, index=True)
     contract_data_id = Column(Integer, ForeignKey("contract_data.id"), nullable=False, unique=True, index=True)
-    entity_uuid = Column(String(36))  # UUID из 1С
+    entity_uuid = Column(String(36))  # UUID контрагента из 1С
     entity_name = Column(String(255))
+    agreement_uuid = Column(String(36))  # UUID договора из 1С
     status_1c = Column(SQLEnum(OneCStatus))
     created_in_1c_at = Column(DateTime(timezone=True))
     response_from_1c = Column(JSONB)
     error_from_1c = Column(Text)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
-    
+
     # Relationships
     contract_data = relationship("ContractData", back_populates="counterparty_1c")
 

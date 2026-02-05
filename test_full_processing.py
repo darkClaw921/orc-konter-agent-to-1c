@@ -361,7 +361,8 @@ def main():
         file_path = sys.argv[1]
     else:
         # Значение по умолчанию - укажите свой путь
-        file_path = "/Users/igorgerasimov/cursorWorkspace/orc-konter-agent-to-1c/storage/contracts/uploaded/00a08716-f1d7-485c-a015-275223d5a828.docx"
+        # file_path = "/Users/igorgerasimov/cursorWorkspace/orc-konter-agent-to-1c/storage/contracts/uploaded/00a08716-f1d7-485c-a015-275223d5a828.docx"
+        file_path = "/Users/igorgerasimov/cursorWorkspace/orc-konter-agent-to-1c/storage/contracts/uploaded/90977cde-e531-4ea3-ab9a-6c8483bf339f.docx"
 
     print("=" * 70)
     print("ТЕСТ ПОЛНОЙ ОБРАБОТКИ ДОКУМЕНТА")

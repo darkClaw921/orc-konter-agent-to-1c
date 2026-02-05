@@ -111,7 +111,8 @@ class MCPServer:
             return await self._add_note(params)
         
         elif command == 'add_agreement':
-            return await self._add_agreement(params)
+            # add_agreement теперь использует _create_agreement с полной логикой правил 2.10
+            return await self._create_agreement(params)
         
         else:
             raise ValueError(f"Unknown command: {command}")
@@ -711,12 +712,12 @@ class MCPServer:
                    has_contract_name=bool(params.get('contract_name')),
                    has_contract_number=bool(params.get('contract_number')))
         
-        inn = params.get('inn') or ''
-        kpp = params.get('kpp')
+        inn = params.get('inn') or params.get('customer', {}).get('inn')
+        kpp = params.get('kpp') or params.get('customer', {}).get('kpp')
         full_name = params.get('full_name') or ''
-        short_name = params.get('short_name')
-        organizational_form = params.get('organizational_form')
-        role = params.get('role', '')
+        short_name = params.get('short_name') or params.get('customer', {}).get('short_name')
+        organizational_form = params.get('organizational_form') or params.get('customer', {}).get('organizational_form')
+        role = params.get('role', '') or params.get('customer', {}).get('role')
         legal_entity_type_param = params.get('legal_entity_type', '')
         
         # Правило 2.1: Определить роль контрагента (Поставщик/Покупатель)
@@ -908,8 +909,8 @@ class MCPServer:
                 contract_number = params.get('contract_number')
                 contract_date = params.get('contract_date')
                 contract_price = params.get('contract_price')
-                service_start_date = params.get('service_start_date')
-                service_end_date = params.get('service_end_date')
+                service_start_date = params.get('service_period_start')
+                service_end_date = params.get('service_period_end')
                 
                 logger.info("Preparing agreement data",
                            has_contract_name=bool(contract_name),
@@ -1017,7 +1018,9 @@ class MCPServer:
                     'organization_uuid': params.get('organization_uuid'),
                     'agreement_type': agreement_type,
                     'is_supplier': is_supplier,
-                    'is_buyer': is_buyer
+                    'is_buyer': is_buyer,
+                    'service_start_date': service_start_date,
+                    'service_end_date': service_end_date,
                 } 
                 logger.info("Agreement data", agreement_data=agreement_data)
                 agreement_result = await self._create_agreement(agreement_data)
@@ -1190,29 +1193,29 @@ class MCPServer:
                 raise ValueError("note_text is required or contract params must be provided to generate note")
         
         # Проверяем существование контрагента
+        # ВАЖНО: 1С не разрешает фильтрацию по Ref_Key в OData запросах
+        # Используем прямой доступ к записи по UUID: Catalog_Контрагенты(guid'uuid')
         try:
-            # Используем query_data для проверки существования контрагента
-            # Формат фильтра: guid'uuid'
-            result = await self.oneс_client.query_data(
-                entity_set='Catalog_Контрагенты',
-                filter_expr=f"Ref_Key eq guid'{counterparty_uuid}'",
-                top=1
-            )
-            
-            if not result or not result.get('value') or len(result['value']) == 0:
+            query = f"Catalog_Контрагенты(guid'{counterparty_uuid}')"
+            result = await self.oneс_client.execute_query(query)
+
+            if not result or not result.get('Ref_Key'):
                 raise ValueError(f"Counterparty with UUID {counterparty_uuid} not found")
-            
-            logger.info("Counterparty found, proceeding with note creation", 
+
+            logger.info("Counterparty found, proceeding with note creation",
                        counterparty_uuid=counterparty_uuid)
         except Exception as e:
-            logger.error("Failed to verify counterparty existence", 
-                        error=str(e), 
+            logger.error("Failed to verify counterparty existence",
+                        error=str(e),
                         counterparty_uuid=counterparty_uuid)
             raise ValueError(f"Failed to verify counterparty: {str(e)}")
         
         # Создаем запись заметки
         comment = params.get('comment')
-        
+        note_result = None
+        note_error = None
+        note_already_exists = False
+
         try:
             note_result = await self._create_contact_info_record(
                 counterparty_uuid=counterparty_uuid,
@@ -1221,85 +1224,104 @@ class MCPServer:
                 comment=comment,
                 note_type='Другое'  # Тип заметки согласно документации
             )
-            
+
             logger.info("Note added successfully to counterparty",
                       counterparty_uuid=counterparty_uuid,
                       note_uuid=note_result.get('uuid'))
-            
-            # После успешного создания заметки создаем договор
-            create_agreement = params.get('create_agreement', True)
-            agreement_result = None
-            agreement_error = None
-            
-            if create_agreement:
-                try:
-                    logger.info("Creating agreement after note creation",
-                               counterparty_uuid=counterparty_uuid)
-                    
-                    # Подготавливаем параметры для создания договора
-                    agreement_params = {
-                        'counterparty_uuid': counterparty_uuid,
-                    }
-                    
-                    # Копируем параметры договора из params, если они есть
-                    agreement_params_to_copy = [
-                        'description', 'agreement_description',
-                        'currency_key', 'settlement_method', 'contract_conditions_type',
-                        'control_debt_amount', 'control_debt_days', 'organization_key',
-                        'price_type', 'agreement_type', 'contract_date'
-                    ]
-                    
-                    for param_key in agreement_params_to_copy:
-                        if param_key in params:
-                            # Если есть agreement_description, используем его как description
-                            if param_key == 'agreement_description':
-                                agreement_params['description'] = params[param_key]
-                            else:
-                                agreement_params[param_key] = params[param_key]
-                    
-                    # Если description не указан, используем note_text как описание договора
-                    if not agreement_params.get('description'):
-                        agreement_params['description'] = note_text
-                    
-                    agreement_result = await self._add_agreement(agreement_params)
-                    
-                    logger.info("Agreement created successfully after note",
-                               counterparty_uuid=counterparty_uuid,
-                               agreement_uuid=agreement_result.get('uuid'))
-                    
-                except Exception as e:
-                    agreement_error = str(e)
-                    logger.error("Failed to create agreement after note - this is non-critical, note was created successfully", 
-                               error=agreement_error,
-                               error_type=type(e).__name__,
-                               counterparty_uuid=counterparty_uuid,
-                               note="Agreement can be created manually later in 1C if needed",
-                               exc_info=True)
-                    # НЕ прерываем выполнение - заметка уже создана
-            
-            # Формируем результат
-            result = {
-                'created': True,
-                'uuid': note_result.get('uuid'),
-                'entity': note_result.get('entity')
-            }
-            
-            # Добавляем информацию о договоре, если он был создан
-            if agreement_result:
-                result['agreement_uuid'] = agreement_result.get('uuid')
-                result['agreement_entity'] = agreement_result.get('entity')
-            
-            if agreement_error:
-                result['agreement_error'] = agreement_error
-            
-            return result
-            
+
         except Exception as e:
-            logger.error("Failed to add note to counterparty",
-                        error=str(e),
-                        counterparty_uuid=counterparty_uuid,
-                        exc_info=True)
-            raise
+            note_error = str(e)
+            # Проверяем, является ли ошибка дубликатом записи
+            if 'уже существует' in note_error.lower() or 'already exists' in note_error.lower():
+                note_already_exists = True
+                logger.warning("Note already exists for counterparty, skipping note creation but will create agreement",
+                             counterparty_uuid=counterparty_uuid,
+                             error=note_error)
+            else:
+                logger.error("Failed to add note to counterparty",
+                            error=note_error,
+                            counterparty_uuid=counterparty_uuid,
+                            exc_info=True)
+                raise
+
+        # Создаем договор независимо от результата создания заметки
+        create_agreement = params.get('create_agreement', True)
+        agreement_result = None
+        agreement_error = None
+
+        # if create_agreement:
+        #     try:
+        #         logger.info("Creating agreement for counterparty",
+        #                    counterparty_uuid=counterparty_uuid,
+        #                    note_created=note_result is not None,
+        #                    note_already_exists=note_already_exists)
+
+        #         # Подготавливаем параметры для создания договора
+        #         agreement_params = {
+        #             'counterparty_uuid': counterparty_uuid,
+        #         }
+
+        #         # Копируем параметры договора из params, если они есть
+        #         agreement_params_to_copy = [
+        #             'description', 'agreement_description',
+        #             'currency_key', 'settlement_method', 'contract_conditions_type',
+        #             'control_debt_amount', 'control_debt_days', 'organization_key',
+        #             'price_type', 'agreement_type', 'contract_date',
+        #             # Дополнительные параметры для срока действия и расчетов
+        #             'service_start_date', 'service_end_date',
+        #             'contract_price', 'contract_number', 'contract_name',
+        #             'payment_terms', 'allowed_debt_days',
+        #             'is_supplier', 'is_buyer'
+        #         ]
+
+        #         for param_key in agreement_params_to_copy:
+        #             if param_key in params:
+        #                 # Если есть agreement_description, используем его как description
+        #                 if param_key == 'agreement_description':
+        #                     agreement_params['description'] = params[param_key]
+        #                 else:
+        #                     agreement_params[param_key] = params[param_key]
+
+        #         # Если description не указан, используем note_text как описание договора
+        #         if not agreement_params.get('description'):
+        #             agreement_params['description'] = note_text
+
+        #         # agreement_result = await self._add_agreement(agreement_params)
+
+        #         logger.info("Agreement created successfully",
+        #                    counterparty_uuid=counterparty_uuid,
+        #                    agreement_uuid=agreement_result.get('uuid'))
+
+            # except Exception as e:
+            #     agreement_error = str(e)
+            #     logger.error("Failed to create agreement - this is non-critical",
+            #                error=agreement_error,
+            #                error_type=type(e).__name__,
+            #                counterparty_uuid=counterparty_uuid,
+            #                note="Agreement can be created manually later in 1C if needed",
+            #                exc_info=True)
+            #     # НЕ прерываем выполнение
+
+        # Формируем результат
+        result = {
+            'created': note_result is not None or note_already_exists,
+            'uuid': note_result.get('uuid') if note_result else None,
+            'entity': note_result.get('entity') if note_result else None,
+            'note_already_exists': note_already_exists
+        }
+
+        # Добавляем информацию о договоре, если он был создан
+        if agreement_result:
+            result['agreement_uuid'] = agreement_result.get('uuid')
+            result['agreement_entity'] = agreement_result.get('entity')
+
+        if agreement_error:
+            result['agreement_error'] = agreement_error
+
+        if note_error and not note_already_exists:
+            result['note_error'] = note_error
+
+        return result
     
     async def _add_agreement(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -1331,21 +1353,20 @@ class MCPServer:
             raise ValueError("counterparty_uuid is required")
         
         # Проверяем существование контрагента
+        # ВАЖНО: 1С не разрешает фильтрацию по Ref_Key в OData запросах
+        # Используем прямой доступ к записи по UUID: Catalog_Контрагенты(guid'uuid')
         try:
-            result = await self.oneс_client.query_data(
-                entity_set='Catalog_Контрагенты',
-                filter_expr=f"Ref_Key eq guid'{counterparty_uuid}'",
-                top=1
-            )
-            
-            if not result or not result.get('value') or len(result['value']) == 0:
+            query = f"Catalog_Контрагенты(guid'{counterparty_uuid}')"
+            result = await self.oneс_client.execute_query(query)
+
+            if not result or not result.get('Ref_Key'):
                 raise ValueError(f"Counterparty with UUID {counterparty_uuid} not found")
-            
-            logger.info("Counterparty found, proceeding with agreement creation", 
+
+            logger.info("Counterparty found, proceeding with agreement creation",
                        counterparty_uuid=counterparty_uuid)
         except Exception as e:
-            logger.error("Failed to verify counterparty existence", 
-                        error=str(e), 
+            logger.error("Failed to verify counterparty existence",
+                        error=str(e),
                         counterparty_uuid=counterparty_uuid)
             raise ValueError(f"Failed to verify counterparty: {str(e)}")
         
@@ -1373,14 +1394,85 @@ class MCPServer:
         # Контроль суммы задолженности - всегда передается
         control_debt_amount = params.get('control_debt_amount', True)
         agreement_data['КонтролироватьСуммуЗадолженности'] = control_debt_amount
-        
-        # Контроль числа дней задолженности - всегда передается
+
+        # Расчет допустимой суммы задолженности = цена контракта / продолжительность в месяцах
+        contract_price = params.get('contract_price')
+        service_start_date = params.get('service_start_date')
+        service_end_date = params.get('service_end_date')
+
+        if control_debt_amount and contract_price and service_start_date and service_end_date:
+            try:
+                price_value = float(contract_price)
+                if isinstance(service_start_date, str):
+                    start_date = datetime.strptime(service_start_date, '%Y-%m-%d').date()
+                else:
+                    start_date = service_start_date
+
+                if isinstance(service_end_date, str):
+                    end_date = datetime.strptime(service_end_date, '%Y-%m-%d').date()
+                else:
+                    end_date = service_end_date
+
+                # Вычисляем количество месяцев
+                months_diff = (end_date.year - start_date.year) * 12 + (end_date.month - start_date.month)
+                if months_diff > 0:
+                    allowed_debt_amount = price_value / months_diff
+                    agreement_data['ДопустимаяСуммаЗадолженности'] = allowed_debt_amount
+                    logger.info("Calculated allowed debt amount from contract price",
+                               price=price_value,
+                               months=months_diff,
+                               allowed_debt_amount=allowed_debt_amount)
+            except Exception as e:
+                logger.warning("Failed to calculate allowed debt amount in _add_agreement", error=str(e))
+
+        # Контроль числа дней задолженности
+        # Получаем количество дней отсрочки из параметров
+        allowed_debt_days = params.get('allowed_debt_days') or params.get('payment_deferral_days')
         control_debt_days = params.get('control_debt_days', False)
+
+        # Пытаемся извлечь дни отсрочки из payment_terms, если не указаны напрямую
+        payment_terms = params.get('payment_terms')
+        if not allowed_debt_days and payment_terms:
+            import re
+            patterns = [
+                r'отсрочка\s+(\d+)\s+дн',
+                r'(\d+)\s+дн[еяй]?\s+отсроч',
+                r'отсрочка\s+(\d+)',
+                r'(\d+)\s+дн[еяй]?\s+оплат',
+            ]
+            payment_terms_str = str(payment_terms) if payment_terms else ''
+            for pattern in patterns:
+                match = re.search(pattern, payment_terms_str.lower())
+                if match:
+                    try:
+                        allowed_debt_days = int(match.group(1))
+                        logger.info("Extracted deferral days from payment_terms in _add_agreement",
+                                   payment_terms=payment_terms,
+                                   days=allowed_debt_days)
+                        break
+                    except (ValueError, IndexError):
+                        continue
+
+        # Если найдены дни отсрочки, включаем контроль и устанавливаем значение
+        if allowed_debt_days is not None:
+            try:
+                allowed_debt_days = int(allowed_debt_days)
+                if allowed_debt_days > 0:
+                    control_debt_days = True
+                    agreement_data['ДопустимоеЧислоДнейЗадолженности'] = allowed_debt_days
+                    logger.info("Set allowed debt days in agreement",
+                               allowed_debt_days=allowed_debt_days)
+            except (ValueError, TypeError):
+                logger.warning("Invalid allowed_debt_days value in _add_agreement", value=allowed_debt_days)
+
         agreement_data['КонтролироватьЧислоДнейЗадолженности'] = control_debt_days
-        
+
         # Обособленный учет товаров по заказам покупателей - всегда передается
-        agreement_data['ОбособленныйУчетТоваровПоЗаказамПокупателей'] = False
-        
+        # agreement_data['ОбособленныйУчетТоваровПоЗаказамПокупателей'] = False
+
+        # Вести по документам расчетов с контрагентом - обязательное поле
+        agreement_data['ВестиПоДокументамРасчетовСКонтрагентом'] = True
+
         # Организация - обязательное поле
         organization_key = params.get('organization_key')
         if not organization_key:
@@ -1400,14 +1492,45 @@ class MCPServer:
         agreement_type = params.get('agreement_type', 'Прочее')
         agreement_data['ВидДоговора'] = agreement_type
         
-        # Дата договора - всегда передается
+        # Дата договора - всегда передается (формат должен быть YYYY-MM-DDTHH:MM:SS)
         contract_date = params.get('contract_date', '0001-01-01T00:00:00')
+        # Конвертируем дату в формат с временем если нужно
+        if contract_date and isinstance(contract_date, str):
+            if 'T' not in contract_date:
+                # Дата без времени, добавляем время
+                contract_date = contract_date + 'T00:00:00'
         agreement_data['Дата'] = contract_date
-        
+
+        # Срок действия договора (из service_end_date)
+        service_end_date = params.get('service_end_date')
+        if service_end_date:
+            if isinstance(service_end_date, str):
+                try:
+                    term_date_obj = datetime.strptime(service_end_date, '%Y-%m-%d').date()
+                    agreement_data['СрокДействия'] = term_date_obj.isoformat() + 'T00:00:00'
+                    logger.info("Set agreement term date from service_end_date",
+                               service_end_date=service_end_date,
+                               term_date=agreement_data['СрокДействия'])
+                except ValueError:
+                    logger.warning("Failed to parse service_end_date", value=service_end_date)
+            else:
+                agreement_data['СрокДействия'] = service_end_date.isoformat() + 'T00:00:00'
+                logger.info("Set agreement term date from service_end_date",
+                           service_end_date=str(service_end_date),
+                           term_date=agreement_data['СрокДействия'])
+
+        # Вид договора на основе роли контрагента
+        is_supplier = params.get('is_supplier', False)
+        is_buyer = params.get('is_buyer', False)
+        if is_buyer:
+            agreement_data['ВидДоговора'] = 'СПокупателем'
+        elif is_supplier:
+            agreement_data['ВидДоговора'] = 'СПоставщиком'
+
         # Удаляем пустые значения (но не булевы False)
-        agreement_data = {k: v for k, v in agreement_data.items() 
+        agreement_data = {k: v for k, v in agreement_data.items()
                          if not (v is None or (isinstance(v, str) and v == ''))}
-        
+
         logger.info("Creating agreement for counterparty",
                    counterparty_uuid=counterparty_uuid,
                    agreement_data_keys=list(agreement_data.keys()),
@@ -1562,8 +1685,8 @@ class MCPServer:
         contract_number = params.get('contract_number')
         contract_date = params.get('contract_date')
         contract_price = params.get('contract_price') or params.get('price')
-        service_start_date = params.get('service_start_date')
-        service_end_date = params.get('service_end_date')
+        service_start_date = params.get('service_start_date') or params.get('service_period_start')
+        service_end_date = params.get('service_end_date') or params.get('service_period_end')
         payment_terms = params.get('payment_terms')
         
         # Правило 2.10.1: Наименование договора в формате "Договор №... от ..."
@@ -1731,7 +1854,7 @@ class MCPServer:
         agreement_data['ВидУсловийДоговора'] = 'БезДополнительныхУсловий'
         
         # Обособленный учет товаров по заказам покупателей - всегда передается
-        agreement_data['ОбособленныйУчетТоваровПоЗаказамПокупателей'] = False
+        # agreement_data['ОбособленныйУчетТоваровПоЗаказамПокупателей'] = False
         
         # Тип цен - всегда передается
         price_type = params.get('price_type', '00000000-0000-0000-0000-000000000000')
@@ -1749,7 +1872,7 @@ class MCPServer:
                     pass
             else:
                 contract_date_iso = contract_date.isoformat() + 'T00:00:00'
-        agreement_data['Дата'] = contract_date_iso
+        agreement_data['Дата'] = contract_date
         
         # Добавляем организацию - обязательное поле
         # Сначала проверяем, указана ли организация в параметрах
@@ -1817,10 +1940,19 @@ class MCPServer:
                 'ВидУсловийДоговора': 'БезДополнительныхУсловий',
                 'КонтролироватьСуммуЗадолженности': control_debt_amount,
                 'КонтролироватьЧислоДнейЗадолженности': control_debt_days,
-                'ОбособленныйУчетТоваровПоЗаказамПокупателей': False,
+                'ВестиПоДокументамРасчетовСКонтрагентом': True,
+                # 'КонтролироватьСуммуЗадолженности': control_debt_amount,
+                'КонтролироватьЧислоДнейЗадолженности': control_debt_days,
                 'ТипЦен': params.get('price_type', '00000000-0000-0000-0000-000000000000'),
                 'ТипЦен_Type': 'StandardODATA.Catalog_ТипыЦенНоменклатуры',
                 'Дата': params.get('contract_date', '0001-01-01T00:00:00'),
+                'СрокДействия': params.get('service_end_date') or params.get('service_period_end'),
+                'ЦенаДоговора': params.get('price', 0) or params.get('contract_price', 0),
+                # 'ДопустимоеЧислоДнейЗадолженности': '',
+                'ДопустимаяСуммаЗадолженности': round(float(params.get('allowed_debt_amount', allowed_debt_amount)), 1),
+                # 'ДопустимоеЧислоДнейЗадолженности': str(params.get('allowed_debt_days', 0)),
+                # 'ДопустимоеЧислоДнейЗадолженности': '5.0', # TODO не работает с любым типом данных
+                
             }
             
             # Добавляем обязательное поле Организация_Key если оно было получено
@@ -1869,7 +2001,10 @@ class MCPServer:
                         'ВидУсловийДоговора': 'БезДополнительныхУсловий',
                         'КонтролироватьСуммуЗадолженности': control_debt_amount,
                         'КонтролироватьЧислоДнейЗадолженности': control_debt_days,
-                        'ОбособленныйУчетТоваровПоЗаказамПокупателей': False,
+                        # 'ОбособленныйУчетТоваровПоЗаказамПокупателей': False,
+                        "ВестиПоДокументамРасчетовСКонтрагентом": True,
+                        "КонтролироватьСуммуЗадолженности": control_debt_amount,
+                        "КонтролироватьЧислоДнейЗадолженности": control_debt_days,
                         'Организация_Key': organization_uuid if organization_uuid else 'fd72d6f7-07d6-11e2-a788-001d60b2ee3b',
                         'ТипЦен': params.get('price_type', '00000000-0000-0000-0000-000000000000'),
                         'ТипЦен_Type': 'StandardODATA.Catalog_ТипыЦенНоменклатуры',
@@ -2073,92 +2208,102 @@ if __name__ == '__main__':
         # result = await server._create_agreement(params)
         # print(result)
         params= {
-            "inn": "4720016318",
-            "kpp": "472501002",
-            "full_name": "Государственное бюджетное учреждение здравоохранения Ленинградской области  ЛОМОНОСОВСКАЯ МЕЖРАЙОННАЯ БОЛЬНИЦА ИМ.И.Н.ЮДЧЕНКО",
-            "short_name": "ГБУЗ ЛО «Ломоносовская МБ»",
-            "legal_entity_type": "Юридическое лицо",
-            "organizational_form": "Государственное бюджетное учреждение",
-            "role": "Заказчик",
-            "is_supplier": False,
-            "is_buyer": True,
-            "locations": [
-            {
-                "city": "Ломоносов",
-                "region": "Ленинградская область",
-                "address": "г. Ломоносов , ул. Еленинская, 13",
-                "postal_code": "198412"
-            }
-            ],
-            "responsible_persons": [
-            {
-                "name": "Усов Сергей Борисович",
-                "email": "nach-snab@lmnmed.ru",
-                "phone": "8(812)679-47-88",
-                "position": "Главный врач"
-            },
-            {
-                "name": "Блинов Константин Михайлович",
-                "email": "info@zapravka39.ru",
-                "phone": "74012666636",
-                "position": "Генеральный директор"
-            }
-            ],
-            "service_start_date": None,
-            "service_end_date": None,
-            "contract_name": "Контракт",
-            "contract_number": "03453000125240003140001",
-            "contract_date": "2024-01-01",
-            "contract_price": 1500000,
-            "vat_percent": None,
-            "vat_type": None,
-            "service_description": None,
-            "services": [
-            {
-                "name": "Услуга по ремонту и техническому обслуживанию оргтехники",
-                "unit": None,
-                "quantity": None,
-                "unit_price": None,
-                "description": "Диагностика предоставленного Заказчиком оборудования, его разборка, профилактические работы по очистке от: пыли, тонера и иных загрязнений, замену вышедших из строя или выработавших свой ресурс деталей, сборку, тестовую проверку.",
-                "total_price": None
-            },
-            {
-                "name": "Услуга по заправке картриджей",
-                "unit": None,
-                "quantity": None,
-                "unit_price": None,
-                "description": "Разборка, чистка всех его компонентов, заполнение тонерного отделения тонером соответствующей марки, замену вышедших из строя комплектующих и последующую сборку.",
-                "total_price": None
-            }
-            ],
-            "acceptance_procedure": "Исполнитель обязан своевременно предоставлять достоверную информацию о ходе исполнения своих обязательств.",
-            "specification_exists": False,
-            "pricing_method": None,
-            "reporting_forms": None,
-            "additional_conditions": None,
-            "technical_info": None,
-            "task_execution_term": None,
-            "customer": {
-            "inn": "4720016318",
-            "kpp": "472501002",
-            "full_name": "Государственное бюджетное учреждение здравоохранения Ленинградской области  ЛОМОНОСОВСКАЯ МЕЖРАЙОННАЯ БОЛЬНИЦА ИМ.И.Н.ЮДЧЕНКО",
-            "short_name": "ГБУЗ ЛО «Ломоносовская МБ»",
-            "legal_entity_type": "Юридическое лицо",
-            "organizational_form": "Государственное бюджетное учреждение"
-            },
-            "contractor": {
-            "inn": "3904090275",
-            "kpp": "390601001",
-            "full_name": "Общество с ограниченной ответственностью «Идеальный магазин»",
-            "short_name": "ООО «Идеальный магазин»",
-            "legal_entity_type": "Юридическое лицо",
-            "organizational_form": "Общество с ограниченной ответственностью"
-            },
-            "organization_uuid": None,
-            "allowed_debt_days": None,
-            "payment_terms": "Оплата по настоящему Контракту производится Заказчиком без авансирования за фактически оказанные услуги в срок не более семи рабочих дней с даты подписания.",
-            'raw_text': None
-        }
+  "legacy": {
+    "inn": "322392600031",
+    "kpp": None,
+    "is_buyer": True,
+    "full_name": "Индивидуальный предприниматель Буров Андрей Геннадьевич",
+    "short_name": "ИП Буров А.Г.",
+    "is_supplier": True,
+    "legal_entity_type": "Физическое лицо",
+    "organizational_form": "Индивидуальный предприниматель"
+  },
+  "customer": {
+    "inn": "7811034620",
+    "kpp": "781101001",
+    "full_name": "Санкт-Петербургское государственное бюджетное профессиональное образовательное учреждение «Академия машиностроения имени Ж.Я. Котина»",
+    "short_name": "СПб ГБПОУ «АМК»",
+    "legal_entity_type": "Юридическое лицо",
+    "organizational_form": "Государственное бюджетное профессиональное образовательное учреждение"
+  },
+  "contractor": {
+    "inn": "322392600031",
+    "kpp": None,
+    "full_name": "Индивидуальный предприниматель Буров Андрей Геннадьевич",
+    "short_name": "ИП Буров А.Г.",
+    "legal_entity_type": "Физическое лицо",
+    "organizational_form": "Индивидуальный предприниматель"
+  },
+  "contract_date": "2025-01-01",
+  "contract_name": "КОНТРАКТ",
+  "payment_terms": "Оплата производится Заказчиком по факту оказанных услуг, в течение 7 (семи) рабочих дней с момента подписания Сторонами документа о приемке, после предоставления Исполнителем счет-фактуры (при наличии), путем перечисления денежных средств на расчетный счет Исполнителя.",
+  "contract_price": 99980.0,
+  "pricing_method": None,
+  "contract_number": "0179",
+  "reporting_forms": None,
+  "vat_information": "Без НДС",
+  "service_locations": [
+    {
+      "city": "Санкт-Петербург",
+      "region": None,
+      "address": "192174, Санкт-Петербург, ул. Бабушкина, д.119, литера А",
+      "postal_code": "192174"
+    },
+    {
+      "city": "Калининград",
+      "region": None,
+      "address": "236038, г. Калининград, ул. Ю. Гагарина, д. 2А, к. 6, кв. 43",
+      "postal_code": "236038"
+    }
+  ],
+  "service_period_end": "2025-12-10",
+  "contact_information": {
+    "phone_numbers": [
+      "362-32-15",
+      "+79118608650"
+    ],
+    "email_addresses": [
+      "info@academykotin.ru",
+      "clatgor@gmail.com"
+    ],
+    "postal_addresses": [
+      {
+        "address": "192174, Санкт-Петербург, ул. Бабушкина, д.119, литера А"
+      },
+      {
+        "address": "236038, г. Калининград, ул. Ю. Гагарина, д. 2А, к. 6, кв. 43"
+      }
+    ]
+  },
+  "responsible_persons": [
+    {
+      "name": "Платонов Евгений Владимирович",
+      "email": "info@academykotin.ru",
+      "phone": "362-32-15",
+      "position": "Директор"
+    },
+    {
+      "name": "Буров Андрей Геннадьевич",
+      "email": "clatgor@gmail.com",
+      "phone": "+79118608650",
+      "position": "Индивидуальный предприниматель"
+    }
+  ],
+  "acceptance_procedure": "Приемка услуг производится в соответствии с требованиями, установленными настоящим Контрактом и Техническим заданием (Приложение № 1).",
+  "service_period_start": "2025-01-01",
+  "specification_exists": True,
+  "additional_conditions": None,
+  "payment_deferral_days": 7,
+  "technical_information": None,
+  "service_goods_description": "оказание услуг, направленных на выполнение функций учреждения (ремонт и профилактическое обслуживание печатно-копировальной техники), доставка печатно-копировальной техники в сервисный центр Исполнителя для ремонта и возврат после ремонта.",
+  "raw_text": None,
+}
   
-        result = await server._create_counterparty(params)
+        # result = await server._create_counterparty(params)
+        # print(result)
+        # params['counterparty_uuid'] = result.get('uuid')
+        params['counterparty_uuid'] = 'e6734bb1-0222-11f1-9d06-7085c2496eb6'
+        result2 = await server._create_agreement(params)
+        print(result2)
+
     asyncio.run(main2())

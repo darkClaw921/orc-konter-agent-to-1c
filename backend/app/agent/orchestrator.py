@@ -37,6 +37,56 @@ class AgentOrchestrator:
         self.oneс_service = oneс_service
         self.progress_service = progress_service
     
+    def _get_customer_from_data(self, extracted_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """
+        Получить данные customer из extracted_data, поддерживая обе структуры:
+        1. Прямая структура: extracted_data['customer']
+        2. Вложенная структура: extracted_data['contract']['customer']
+        """
+        if not extracted_data:
+            return None
+        
+        # Проверяем прямую структуру
+        if 'customer' in extracted_data:
+            customer = extracted_data['customer']
+            if isinstance(customer, dict):
+                return customer
+        
+        # Проверяем вложенную структуру
+        if 'contract' in extracted_data and isinstance(extracted_data['contract'], dict):
+            contract_data = extracted_data['contract']
+            if 'customer' in contract_data:
+                customer = contract_data['customer']
+                if isinstance(customer, dict):
+                    return customer
+        
+        return None
+    
+    def _get_contractor_from_data(self, extracted_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """
+        Получить данные contractor из extracted_data, поддерживая обе структуры:
+        1. Прямая структура: extracted_data['contractor']
+        2. Вложенная структура: extracted_data['contract']['contractor']
+        """
+        if not extracted_data:
+            return None
+        
+        # Проверяем прямую структуру
+        if 'contractor' in extracted_data:
+            contractor = extracted_data['contractor']
+            if isinstance(contractor, dict):
+                return contractor
+        
+        # Проверяем вложенную структуру
+        if 'contract' in extracted_data and isinstance(extracted_data['contract'], dict):
+            contract_data = extracted_data['contract']
+            if 'contractor' in contract_data:
+                contractor = contract_data['contractor']
+                if isinstance(contractor, dict):
+                    return contractor
+        
+        return None
+    
     async def process_contract(self, contract_id: int, document_path: str) -> AgentState:
         """
         Главный pipeline обработки контракта
@@ -255,8 +305,8 @@ class AgentOrchestrator:
         counterparty_info = []
         
         # Информация о заказчике
-        customer = extracted_data.get('customer')
-        if isinstance(customer, dict):
+        customer = self._get_customer_from_data(extracted_data)
+        if customer:
             customer_info = []
             if customer.get('inn'):
                 customer_info.append(f"ИНН: {customer['inn']}")
@@ -273,8 +323,8 @@ class AgentOrchestrator:
                 counterparty_info.extend([f"  {info}" for info in customer_info])
         
         # Информация об исполнителе
-        contractor = extracted_data.get('contractor')
-        if isinstance(contractor, dict):
+        contractor = self._get_contractor_from_data(extracted_data)
+        if contractor:
             contractor_info = []
             if contractor.get('inn'):
                 contractor_info.append(f"ИНН: {contractor['inn']}")
@@ -405,7 +455,7 @@ class AgentOrchestrator:
             state.raw_text = self.doc_processor.extract_text()
         
         # Максимальный размер для одного запроса: ~8000 токенов = 32000 символов
-        max_single_request_size = 64000
+        max_single_request_size = 34000
         document_size = len(state.raw_text)
         
         if document_size <= max_single_request_size:
@@ -420,7 +470,7 @@ class AgentOrchestrator:
         """
             user_prompt = EXTRACT_CONTRACT_DATA_PROMPT.format(document_text=context)
             full_prompt = f"SYSTEM:\n{system_prompt}\n\nUSER:\n{user_prompt}"
-            
+            # print(full_prompt)
             # Сохраняем информацию о запросе
             request_info = {
                 "request_type": "single",
@@ -642,7 +692,26 @@ class AgentOrchestrator:
             
             try:
                 # Используем финальную агрегацию через LLM
-                state.extracted_data = await self.llm_service.aggregate_chunks_data(chunks_with_context)
+                aggregated_data = await self.llm_service.aggregate_chunks_data(chunks_with_context)
+                
+                # Нормализуем структуру данных: если данные находятся в contract.customer/contractor,
+                # извлекаем их на верхний уровень для совместимости
+                if isinstance(aggregated_data, dict):
+                    if 'contract' in aggregated_data and isinstance(aggregated_data['contract'], dict):
+                        contract_data = aggregated_data['contract']
+                        # Извлекаем customer и contractor на верхний уровень, если они есть
+                        if 'customer' in contract_data:
+                            aggregated_data['customer'] = contract_data['customer']
+                        if 'contractor' in contract_data:
+                            aggregated_data['contractor'] = contract_data['contractor']
+                        # Копируем остальные поля из contract на верхний уровень
+                        for key, value in contract_data.items():
+                            if key not in ['customer', 'contractor']:
+                                aggregated_data[key] = value
+                        # Удаляем вложенную структуру contract, если она больше не нужна
+                        # (оставляем для совместимости, но приоритет у верхнего уровня)
+                
+                state.extracted_data = aggregated_data
                 
                 aggregation_request_info["status"] = "success"
                 aggregation_request_info["response_data"] = state.extracted_data
@@ -720,7 +789,7 @@ class AgentOrchestrator:
         if not state.raw_text:
             state.raw_text = self.doc_processor.extract_text()
 
-        max_single_request_size = 64000
+        max_single_request_size = 32000
         document_size = len(state.raw_text)
 
         if document_size <= max_single_request_size:
@@ -828,8 +897,8 @@ class AgentOrchestrator:
         # Подробное логирование для диагностики извлечения ИНН
         extracted_keys = list(state.extracted_data.keys()) if state.extracted_data else []
         root_inn = state.extracted_data.get('inn')
-        customer_data = state.extracted_data.get('customer')
-        contractor_data = state.extracted_data.get('contractor')
+        customer_data = self._get_customer_from_data(state.extracted_data)
+        contractor_data = self._get_contractor_from_data(state.extracted_data)
 
         logger.info("Extracted data structure for INN lookup",
                    contract_id=state.contract_id,
@@ -858,28 +927,40 @@ class AgentOrchestrator:
 
         # Получаем ИНН из корневых полей или из customer/contractor
         # Согласно правилам: из контракта выявить значение ИНН контрагента
+        # Поддерживаем обе структуры: прямую (customer/contractor на верхнем уровне) 
+        # и вложенную (contract.customer/contractor)
         inn = None
         inn_source = None
 
+        # Проверяем корневой уровень
         if 'inn' in state.extracted_data and state.extracted_data['inn']:
             inn = state.extracted_data['inn']
             inn_source = 'root'
-        elif 'customer' in state.extracted_data and isinstance(state.extracted_data['customer'], dict):
-            inn = state.extracted_data['customer'].get('inn')
-            inn_source = 'customer'
-        elif 'contractor' in state.extracted_data and isinstance(state.extracted_data['contractor'], dict):
-            inn = state.extracted_data['contractor'].get('inn')
-            inn_source = 'contractor'
+        # Проверяем customer (поддерживаем обе структуры)
+        else:
+            customer_data = self._get_customer_from_data(state.extracted_data)
+            if customer_data and customer_data.get('inn'):
+                inn = customer_data.get('inn')
+                inn_source = 'customer'
+            # Проверяем contractor (поддерживаем обе структуры)
+            else:
+                contractor_data = self._get_contractor_from_data(state.extracted_data)
+                if contractor_data and contractor_data.get('inn'):
+                    inn = contractor_data.get('inn')
+                    inn_source = 'contractor'
 
         if not inn:
-            # Подробное логирование ошибки
-            logger.error("INN not found in extracted data",
+            # Если INN не найден, логируем предупреждение и пропускаем проверку в 1С
+            logger.warning("INN not found in extracted data, skipping 1C check",
                         contract_id=state.contract_id,
                         extracted_keys=extracted_keys,
                         root_inn=root_inn,
                         customer_data=customer_data if isinstance(customer_data, dict) else str(customer_data)[:500] if customer_data else None,
                         contractor_data=contractor_data if isinstance(contractor_data, dict) else str(contractor_data)[:500] if contractor_data else None)
-            raise Exception("INN not found in extracted data (checked root, customer, and contractor fields)")
+            # Пропускаем проверку в 1С, но продолжаем обработку
+            # Контрагент будет создан без проверки существования в 1С
+            state.counterparty_inn_source = None
+            return
         
         # Сохраняем источник ИНН для использования при создании контрагента
         state.counterparty_inn_source = inn_source
@@ -975,6 +1056,13 @@ class AgentOrchestrator:
                        contract_id=state.contract_id,
                        existing_id=state.existing_counterparty_id)
             await self._add_agreement_to_existing_counterparty(state)
+            return
+
+        # Если INN не был найден, пропускаем создание контрагента в 1С
+        if not state.counterparty_inn_source:
+            logger.warning("Skipping counterparty creation in 1C: INN not found",
+                          contract_id=state.contract_id)
+            await self._update_progress(state.contract_id, 'creating_in_1c', 100, 'Пропущено: ИНН не найден')
             return
 
         logger.info("Creating counterparty in 1C", contract_id=state.contract_id)
@@ -1258,18 +1346,32 @@ class AgentOrchestrator:
         
         Использует данные из customer или contractor в зависимости от того,
         откуда был взят ИНН при проверке (сохранено в state.counterparty_inn_source).
+        Если INN не найден (inn_source = None), пытается использовать данные из customer или contractor.
         """
         extracted_data = state.extracted_data or {}
         counterparty_data = {}
         
         # Определяем источник данных на основе того, откуда был взят ИНН
-        inn_source = state.counterparty_inn_source or 'root'
+        inn_source = state.counterparty_inn_source
+        
+        # Если INN не был найден, пытаемся использовать данные из customer или contractor
+        if not inn_source:
+            customer = self._get_customer_from_data(extracted_data)
+            contractor = self._get_contractor_from_data(extracted_data)
+            
+            # Предпочитаем contractor (поставщик), так как обычно это основной контрагент
+            if contractor and contractor.get('full_name'):
+                inn_source = 'contractor'
+            elif customer and customer.get('full_name'):
+                inn_source = 'customer'
+            else:
+                inn_source = 'root'
         
         # Базовые данные контрагента
-        if inn_source == 'customer' and 'customer' in extracted_data:
-            # Используем данные из customer
-            customer = extracted_data['customer']
-            if isinstance(customer, dict):
+        if inn_source == 'customer':
+            # Используем данные из customer (поддерживаем обе структуры)
+            customer = self._get_customer_from_data(extracted_data)
+            if customer:
                 counterparty_data = {
                     'inn': customer.get('inn'),
                     'kpp': customer.get('kpp'),
@@ -1279,10 +1381,21 @@ class AgentOrchestrator:
                     'organizational_form': customer.get('organizational_form'),
                     'role': 'Заказчик'  # customer = заказчик
                 }
-        elif inn_source == 'contractor' and 'contractor' in extracted_data:
-            # Используем данные из contractor
-            contractor = extracted_data['contractor']
-            if isinstance(contractor, dict):
+            else:
+                # Fallback на корневые поля
+                counterparty_data = {
+                    'inn': extracted_data.get('inn'),
+                    'kpp': extracted_data.get('kpp'),
+                    'full_name': extracted_data.get('full_name'),
+                    'short_name': extracted_data.get('short_name'),
+                    'legal_entity_type': extracted_data.get('legal_entity_type'),
+                    'organizational_form': extracted_data.get('organizational_form'),
+                    'role': extracted_data.get('role', '')
+                }
+        elif inn_source == 'contractor':
+            # Используем данные из contractor (поддерживаем обе структуры)
+            contractor = self._get_contractor_from_data(extracted_data)
+            if contractor:
                 counterparty_data = {
                     'inn': contractor.get('inn'),
                     'kpp': contractor.get('kpp'),
@@ -1291,6 +1404,17 @@ class AgentOrchestrator:
                     'legal_entity_type': contractor.get('legal_entity_type'),
                     'organizational_form': contractor.get('organizational_form'),
                     'role': 'Поставщик'  # contractor = поставщик
+                }
+            else:
+                # Fallback на корневые поля
+                counterparty_data = {
+                    'inn': extracted_data.get('inn'),
+                    'kpp': extracted_data.get('kpp'),
+                    'full_name': extracted_data.get('full_name'),
+                    'short_name': extracted_data.get('short_name'),
+                    'legal_entity_type': extracted_data.get('legal_entity_type'),
+                    'organizational_form': extracted_data.get('organizational_form'),
+                    'role': extracted_data.get('role', '')
                 }
         else:
             # Используем корневые поля (legacy формат)
@@ -1318,6 +1442,7 @@ class AgentOrchestrator:
             'vat_type': extracted_data.get('vat_type'),
             'service_description': extracted_data.get('service_description'),
             'payment_terms': extracted_data.get('payment_terms'),
+            'payment_deferral_days': extracted_data.get('payment_deferral_days'),
             'acceptance_procedure': extracted_data.get('acceptance_procedure'),
             'specification_exists': extracted_data.get('specification_exists'),
             'pricing_method': extracted_data.get('pricing_method'),
@@ -1325,8 +1450,8 @@ class AgentOrchestrator:
             'additional_conditions': extracted_data.get('additional_conditions'),
             'technical_info': extracted_data.get('technical_info'),
             'task_execution_term': extracted_data.get('task_execution_term'),
-            'customer': extracted_data.get('customer'),  # Для определения организации в заметке
-            'contractor': extracted_data.get('contractor'),  # Для определения организации в заметке
+            'customer': self._get_customer_from_data(extracted_data),  # Для определения организации в заметке
+            'contractor': self._get_contractor_from_data(extracted_data),  # Для определения организации в заметке
             'raw_text': state.raw_text,  # Для поиска фразы "протокол подведения итогов"
             'all_services': extracted_data.get('all_services'),  # Услуги из специализированного извлечения (шаг 3.5)
         })

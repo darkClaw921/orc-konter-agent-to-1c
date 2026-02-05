@@ -130,11 +130,28 @@ def process_contract_task(self, contract_id: int, document_path: str):
                         contract_data.locations = convert_decimal_for_jsonb(state.extracted_data.get("locations"))
                     if state.extracted_data.get("responsible_persons"):
                         contract_data.responsible_persons = convert_decimal_for_jsonb(state.extracted_data.get("responsible_persons"))
-                    if state.extracted_data.get("customer"):
-                        contract_data.customer = convert_decimal_for_jsonb(state.extracted_data.get("customer"))
-                    if state.extracted_data.get("contractor"):
-                        contract_data.contractor = convert_decimal_for_jsonb(state.extracted_data.get("contractor"))
+                    # Получаем customer и contractor, поддерживая обе структуры
+                    customer = state.extracted_data.get("customer")
+                    if not customer and "contract" in state.extracted_data:
+                        contract_data_inner = state.extracted_data.get("contract")
+                        if isinstance(contract_data_inner, dict):
+                            customer = contract_data_inner.get("customer")
                     
+                    contractor = state.extracted_data.get("contractor")
+                    if not contractor and "contract" in state.extracted_data:
+                        contract_data_inner = state.extracted_data.get("contract")
+                        if isinstance(contract_data_inner, dict):
+                            contractor = contract_data_inner.get("contractor")
+                    
+                    if customer:
+                        contract_data.customer = convert_decimal_for_jsonb(customer)
+                    if contractor:
+                        contract_data.contractor = convert_decimal_for_jsonb(contractor)
+                    if state.extracted_data.get("payment_terms"):
+                        contract_data.payment_terms = state.extracted_data.get("payment_terms")
+                    if state.extracted_data.get("payment_deferral_days") is not None:
+                        contract_data.payment_deferral_days = state.extracted_data.get("payment_deferral_days")
+
                     db.commit()
                 except Exception as db_error:
                     db.rollback()

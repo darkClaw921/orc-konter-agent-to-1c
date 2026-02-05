@@ -21,12 +21,12 @@ class ResponsiblePerson(BaseModel):
 
 class CounterpartyInfo(BaseModel):
     """Информация о контрагенте"""
-    inn: str = Field(..., min_length=10, max_length=12, description="ИНН контрагента")
+    inn: Optional[str] = Field(None, min_length=10, max_length=12, description="ИНН контрагента")
     kpp: Optional[str] = Field(None, min_length=9, max_length=9, description="КПП (только для ЮЛ)")
-    full_name: str = Field(..., min_length=5, description="Полное наименование с ОПФ")
+    full_name: Optional[str] = Field(None, min_length=5, description="Полное наименование с ОПФ")
     short_name: Optional[str] = Field(None, min_length=3, description="Краткое наименование без ОПФ")
     organizational_form: Optional[str] = Field(None, description="ОПФ (ООО, АО, ИП и т.д.)")
-    legal_entity_type: LegalEntityType = Field(..., description="Тип юр.лица")
+    legal_entity_type: Optional[LegalEntityType] = Field(None, description="Тип юр.лица")
 
 
 class ServiceLocation(BaseModel):
@@ -79,6 +79,7 @@ class ContractDataSchema(BaseModel):
     customer: Optional[CounterpartyInfo] = Field(None, description="Информация о заказчике (Покупателе)")
     contractor: Optional[CounterpartyInfo] = Field(None, description="Информация об исполнителе (Поставщике)")
     payment_terms: Optional[str] = Field(None, description="Условия оплаты")
+    payment_deferral_days: Optional[int] = Field(None, description="Количество календарных дней отсрочки платежа")
     specification_exists: Optional[bool] = Field(None, description="Наличие спецификации")
     pricing_method: Optional[str] = Field(None, description="Порядок ценообразования")
     acceptance_procedure: Optional[str] = Field(None, description="Порядок приема-сдачи")
